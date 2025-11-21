@@ -1,5 +1,8 @@
 use crate::wasm_code_provider::{self, WasmCodeProvider};
-use tokio::sync::{mpsc::Receiver, oneshot};
+use tokio::sync::{
+    mpsc::{Receiver, UnboundedReceiver, UnboundedSender, unbounded_channel},
+    oneshot,
+};
 use wasmtime::{
     component::{Component, Instance, Val},
     *,
@@ -18,15 +21,14 @@ pub struct Executor<Wcp: WasmCodeProvider> {
     request_rx: Receiver<Request>,
     linker: component::Linker<()>,
     free_instances: Vec<MyInstance>,
-    free_instance_tx: tokio::sync::mpsc::UnboundedSender<MyInstance>,
-    free_instance_rx: tokio::sync::mpsc::UnboundedReceiver<MyInstance>,
+    free_instance_tx: UnboundedSender<MyInstance>,
+    free_instance_rx: UnboundedReceiver<MyInstance>,
 }
 
 impl<Wcp: WasmCodeProvider> Executor<Wcp> {
     pub fn new(engine: Engine, wasm_code_provider: Wcp, request_rx: Receiver<Request>) -> Self {
         let linker = component::Linker::new(&engine);
-        let (free_instance_tx, free_instance_rx) =
-            tokio::sync::mpsc::unbounded_channel::<MyInstance>();
+        let (free_instance_tx, free_instance_rx) = unbounded_channel::<MyInstance>();
         Self {
             engine,
             wasm_code_provider,
@@ -211,14 +213,11 @@ mod tests {
         wat.as_bytes().to_vec()
     }
 
-    fn setup_executor() -> (
-        Executor<MockWasmCodeProvider>,
-        mpsc::Sender<Request>,
-    ) {
+    fn setup_executor() -> (Executor<MockWasmCodeProvider>, mpsc::Sender<Request>) {
         let engine = Engine::default();
         let (tx, rx) = mpsc::channel(100);
-        let provider = MockWasmCodeProvider::new()
-            .with_code("test-component", create_test_component_bytes());
+        let provider =
+            MockWasmCodeProvider::new().with_code("test-component", create_test_component_bytes());
         let executor = Executor::new(engine, provider, rx);
         (executor, tx)
     }
@@ -410,9 +409,9 @@ mod tests {
     #[tokio::test]
     async fn test_try_pop_free_instance() {
         let engine = Engine::default();
-        let (tx, rx) = mpsc::channel(100);
-        let provider = MockWasmCodeProvider::new()
-            .with_code("test-component", create_test_component_bytes());
+        let (_tx, rx) = mpsc::channel(100);
+        let provider =
+            MockWasmCodeProvider::new().with_code("test-component", create_test_component_bytes());
         let mut executor = Executor::new(engine, provider, rx);
 
         assert!(executor.try_pop_free_instance("test-component").is_none());
@@ -438,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn test_try_pop_free_instance_different_code_id() {
         let engine = Engine::default();
-        let (tx, rx) = mpsc::channel(100);
+        let (_tx, rx) = mpsc::channel(100);
         let provider = MockWasmCodeProvider::new()
             .with_code("component-a", create_test_component_bytes())
             .with_code("test-component", create_test_component_bytes());
@@ -463,8 +462,8 @@ mod tests {
     async fn test_my_instance_execute() {
         let engine = Engine::default();
         let linker = component::Linker::new(&engine);
-        let provider = MockWasmCodeProvider::new()
-            .with_code("test-component", create_test_component_bytes());
+        let provider =
+            MockWasmCodeProvider::new().with_code("test-component", create_test_component_bytes());
 
         let mut instance = MyInstance::new(
             "test-component".to_string(),
@@ -480,14 +479,9 @@ mod tests {
             .unwrap();
         assert_eq!(result, vec![Val::U32(10)]);
 
-        let mut instance2 = MyInstance::new(
-            "test-component".to_string(),
-            engine,
-            linker,
-            provider,
-        )
-        .await
-        .unwrap();
+        let mut instance2 = MyInstance::new("test-component".to_string(), engine, linker, provider)
+            .await
+            .unwrap();
 
         let result = instance2
             .execute("mul", &[Val::U32(7), Val::U32(3)])
@@ -499,17 +493,12 @@ mod tests {
     async fn test_my_instance_execute_func_not_found() {
         let engine = Engine::default();
         let linker = component::Linker::new(&engine);
-        let provider = MockWasmCodeProvider::new()
-            .with_code("test-component", create_test_component_bytes());
+        let provider =
+            MockWasmCodeProvider::new().with_code("test-component", create_test_component_bytes());
 
-        let mut instance = MyInstance::new(
-            "test-component".to_string(),
-            engine,
-            linker,
-            provider,
-        )
-        .await
-        .unwrap();
+        let mut instance = MyInstance::new("test-component".to_string(), engine, linker, provider)
+            .await
+            .unwrap();
 
         let result = instance.execute("nonexistent", &[]);
         assert!(matches!(result, Err(Error::FuncNotFound)));
@@ -521,13 +510,8 @@ mod tests {
         let linker = component::Linker::new(&engine);
         let provider = MockWasmCodeProvider::new();
 
-        let result = MyInstance::new(
-            "invalid-component".to_string(),
-            engine,
-            linker,
-            provider,
-        )
-        .await;
+        let result =
+            MyInstance::new("invalid-component".to_string(), engine, linker, provider).await;
 
         assert!(matches!(result, Err(Error::WasmCodeProvider(_))));
     }

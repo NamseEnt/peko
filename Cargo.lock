@@ -322,6 +322,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async_singleflight"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8efe528b12d36088ea252a277b6b63c17bead9a2cbd67900e3aeeac99a181ef9"
+dependencies = [
+ "pin-project",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "atomic-time"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2246,6 +2257,7 @@ dependencies = [
 name = "peko"
 version = "0.1.0"
 dependencies = [
+ "async_singleflight",
  "hyper",
  "memberlist",
  "sonic-rs",

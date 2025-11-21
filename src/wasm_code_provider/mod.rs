@@ -3,6 +3,7 @@ pub mod fs;
 #[derive(Debug)]
 pub enum Error {
     NotFound,
+    IoError { error: std::io::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -16,3 +16,4 @@ wasmtime-wasi = { version = "38.0.4", default-features = false, features = [
 ] }
 hyper = { version = "1.8.1", features = ["server"] }
 sonic-rs = "0.5.6"
+async_singleflight = "0.6.1"

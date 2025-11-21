@@ -16,9 +16,24 @@ Peko is a FaaS platform powered by [wasmtime](https://github.com/bytecodeallianc
 - Rust
 - JavaScript, TypeScript (without Node.js compatibility)
 
+## Example Applications
+
+- Server Side Rendering (SSR)
+- Image Resizing
+- Rest API Server
+
 ## Supported Cloud Providers
 
-- AWS
+- Amazon Web Service (AWS)
+- Oracle Cloud Infrastructure (OCI)
+
+## Supported CDN Providers
+
+- Cloudflare
+
+## Supported Code Providers
+
+- File System (Including NFS like AWS EFS)
 
 ## Internal Implementation
 
