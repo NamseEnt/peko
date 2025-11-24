@@ -36,6 +36,12 @@ Peko is a FaaS platform powered by [wasmtime](https://github.com/bytecodeallianc
 - File System (Including NFS like AWS EFS)
 - S3 and compatible storages
 
+## Not Supported Features
+
+- Multi-thread
+  - Please use async/await instead of multi-threading.
+  - It would be supported in the future with WASI [Shared Everything Threads](https://github.com/WebAssembly/shared-everything-threads).
+
 ## Internal Implementation
 
 - Monolith architecture
