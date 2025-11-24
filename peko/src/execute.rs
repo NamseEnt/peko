@@ -1,8 +1,14 @@
-use crate::wasm_code_provider::{self, CachingProvider};
+use adapt_cache::AdaptCache;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender, unbounded_channel};
-use wasmtime::{Engine, Store, component::Linker};
+use tokio::sync::{
+    mpsc::{Receiver, UnboundedReceiver, UnboundedSender, unbounded_channel},
+    oneshot,
+};
+use wasmtime::{
+    Engine, Store,
+    component::{Component, Linker},
+};
 use wasmtime_wasi::*;
 use wasmtime_wasi_http::{
     WasiHttpCtx, WasiHttpView,
@@ -13,16 +19,18 @@ use wasmtime_wasi_http::{
     body::HyperOutgoingBody,
 };
 
+type Response = hyper::Response<HyperOutgoingBody>;
+
 pub struct Job {
     pub req: hyper::Request<hyper::body::Incoming>,
-    pub res: hyper::Response<hyper::body::Incoming>,
+    pub res_tx: oneshot::Sender<Response>,
     pub code_id: String,
     pub fn_name: String,
 }
 
-pub struct Executor<Wcp: CachingProvider> {
+pub struct Executor<A: AdaptCache<MyInstance, wasmtime::Error>> {
     engine: Engine,
-    wasm_code_provider: Wcp,
+    proxy_cache: A,
     job_rx: Receiver<Job>,
     linker: Linker<ClientState>,
     free_instances: Vec<MyInstance>,
@@ -30,15 +38,18 @@ pub struct Executor<Wcp: CachingProvider> {
     free_instance_rx: UnboundedReceiver<MyInstance>,
 }
 
-impl<Wcp: CachingProvider> Executor<Wcp> {
-    pub fn new(engine: Engine, wasm_code_provider: Wcp, job_rx: Receiver<Job>) -> Self {
+impl<A> Executor<A>
+where
+    A: AdaptCache<MyInstance, wasmtime::Error>,
+{
+    pub fn new(engine: Engine, proxy_cache: A, job_rx: Receiver<Job>) -> Self {
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
         wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker).unwrap();
         let (free_instance_tx, free_instance_rx) = unbounded_channel::<MyInstance>();
         Self {
             engine,
-            wasm_code_provider,
+            proxy_cache,
             job_rx,
             linker,
             free_instances: Vec::new(),
@@ -53,13 +64,13 @@ impl<Wcp: CachingProvider> Executor<Wcp> {
                 self.free_instances.push(instance)
             }
             Some(job) = self.job_rx.recv() => {
-                self.run_job(job);
+                self.spawn_job_runner(job);
             }
         }
     }
-    fn run_job(&mut self, job: Job) {
+    fn spawn_job_runner(&mut self, job: Job) {
         let free_instance = self.try_pop_free_instance(&job.code_id);
-        let wasm_code_provider = self.wasm_code_provider.clone();
+        let proxy_cache = self.proxy_cache.clone();
         let engine = self.engine.clone();
         let linker = self.linker.clone();
         let free_instance_tx = self.free_instance_tx.clone();
@@ -67,23 +78,15 @@ impl<Wcp: CachingProvider> Executor<Wcp> {
         // TODO: Throttle and hard limit for same code_id
 
         tokio::spawn(async move {
-            let instance = if let Some(free_instance) = free_instance {
-                free_instance
-            } else {
-                let result =
-                    MyInstance::new(&job.code_id, &engine, &linker, wasm_code_provider).await;
-                match result {
-                    Ok(instance) => instance,
-                    Err(_error) => {
-                        // TODO: send error response
-                        return;
-                    }
-                }
-            };
-
-            // TODO: call handle_request with the instance.pre and job.req
-            // let result = handle_request(instance.pre.clone(), job.req).await;
-            let _ = free_instance_tx.send(instance);
+            let result = run_job(
+                job,
+                free_instance,
+                proxy_cache,
+                engine,
+                linker,
+                free_instance_tx,
+            )
+            .await;
         });
     }
     fn try_pop_free_instance(&mut self, code_id: &str) -> Option<MyInstance> {
@@ -102,16 +105,60 @@ impl<Wcp: CachingProvider> Executor<Wcp> {
     }
 }
 
+async fn run_job<A>(
+    job: Job,
+    free_instance: Option<MyInstance>,
+    proxy_cache: A,
+    engine: Engine,
+    linker: Linker<ClientState>,
+    free_instance_tx: UnboundedSender<MyInstance>,
+) -> Result<Response, RunJobError>
+where
+    A: AdaptCache<MyInstance, wasmtime::Error>,
+{
+    let instance = if let Some(free_instance) = free_instance {
+        free_instance
+    } else {
+        proxy_cache
+            .get(&job.code_id, |bytes| {
+                let component = unsafe { Component::deserialize(&engine, &bytes)? };
+                let instance_pre = linker.instantiate_pre(&component)?;
+                let proxy_pre = ProxyPre::new(instance_pre)?;
+                Ok((
+                    MyInstance {
+                        code_id: job.code_id.clone(),
+                        pre: proxy_pre,
+                    },
+                    bytes.len(),
+                ))
+            })
+            .await
+            .map_err(RunJobError::ProxyCacheError)?
+    };
+
+    let result = instance.handle_request(job.req).await;
+
+    free_instance_tx.send(instance);
+
+    result.map_err(RunJobError::HandleRequest)
+}
+
+enum RunJobError {
+    ProxyCacheError(adapt_cache::Error<wasmtime::Error>),
+    HandleRequest(wasmtime::Error),
+    ProxyErrorCode(ErrorCode),
+}
+
+impl From<adapt_cache::Error<wasmtime::Error>> for RunJobError {
+    fn from(error: adapt_cache::Error<wasmtime::Error>) -> Self {
+        RunJobError::ProxyCacheError(error)
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
-    WasmCodeProvider(wasm_code_provider::Error),
     Wasmtime(wasmtime::Error),
     FuncNotFound,
-}
-impl From<wasm_code_provider::Error> for Error {
-    fn from(value: wasm_code_provider::Error) -> Self {
-        Self::WasmCodeProvider(value)
-    }
 }
 impl From<wasmtime::Error> for Error {
     fn from(value: wasmtime::Error) -> Self {
@@ -125,24 +172,11 @@ struct MyInstance {
 }
 
 impl MyInstance {
-    async fn new<Wcp: CachingProvider>(
-        code_id: &str,
-        engine: &Engine,
-        linker: &Linker<ClientState>,
-        wasm_code_provider: Wcp,
-    ) -> Result<Self, Error> {
-        let proxy_pre = wasm_code_provider.get(code_id, engine, linker).await?;
-
-        Ok(Self {
-            code_id: code_id.to_string(),
-            pre: proxy_pre,
-        })
-    }
-
     async fn handle_request(
         &self,
         req: hyper::Request<hyper::body::Incoming>,
-    ) -> Result<hyper::Response<HyperOutgoingBody>, Error> {
+        res_tx: oneshot::Sender<Response>,
+    ) -> Result<(), wasmtime::Error> {
         let pre = self.pre.clone();
         let mut store = Store::new(
             pre.engine(),
@@ -152,16 +186,19 @@ impl MyInstance {
                 http: WasiHttpCtx::new(),
             },
         );
+        // store.epoch_deadline_trap();
+        // store.set_epoch_deadline(10);
+        // store.epoch_deadline_async_yield_and_update(delta);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = store.data_mut().new_incoming_request(Scheme::Http, req)?;
         let out = store.data_mut().new_response_outparam(tx)?;
+
+        let proxy = pre.instantiate_async(&mut store).await?;
 
         // Run the http request itself in a separate task so the task can
         // optionally continue to execute beyond after the initial
         // headers/response code are sent.
         let task = tokio::task::spawn(async move {
-            let proxy = pre.instantiate_async(&mut store).await?;
-
             proxy
                 .wasi_http_incoming_handler()
                 .call_handle(store, req, out)
@@ -170,7 +207,24 @@ impl MyInstance {
             wasmtime::Result::<()>::Ok(())
         });
 
-        if let Ok(Ok(resp)) = rx.await {
+        여기부터 작업하면 돼. response 다 제공할때까지 task 돌게 내비두고, 다 제공되었는지를 task.await로 알아낸 후 이제 다시 free instance에 넣어주면 돼.
+        근데 그 말은, free instance에 넣어야하는건 instance가 아니라 proxy라는 것이야.
+
+        match rx.await {
+            Ok(result) => match result {
+                Ok(response) => {
+                    if res_tx.send(response).is_err() {
+                        task.abort();
+                    };
+
+                    return Ok(());
+                }
+                Err(proxy_error_code) => return Err(RunJobError::ProxyErrorCode(proxy_error_code)),
+            },
+            Err(error) => todo!(),
+        }
+
+        if let Ok(Ok(resp)) = result {
             return Ok(resp);
         }
 
