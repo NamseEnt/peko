@@ -1,36 +1,31 @@
 use super::*;
 use std::path::PathBuf;
-use wasmtime::component::Component;
 
 #[derive(Clone)]
-pub struct FsCodeProvider {
+pub struct FsCachingProvider {
     base_path: PathBuf,
 }
 
-impl FsCodeProvider {
+impl FsCachingProvider {
     pub fn new(base_path: PathBuf) -> Self {
         Self { base_path }
     }
 }
 
-impl WasmCodeProvider for FsCodeProvider {
-    async fn get_proxy_pre(
-        &self,
-        id: &str,
-        engine: &Engine,
-        linker: &Linker<ClientState>,
-    ) -> Result<ProxyPre<ClientState>> {
+impl<T> CachingProvider<T> for FsCachingProvider {
+    async fn get(&self, id: &str, instantiator: impl Instantiator<T>) -> Result<T> {
         let path = self.base_path.join(id);
         match tokio::fs::read(path).await {
             Ok(code) => {
-                let component = Component::new(engine, code)?;
-                Ok(ProxyPre::new(linker.instantiate_pre(&component)?)?)
+                let (instance, _size) = instantiator.instantiate(Bytes::from(code))?;
+                // TODO: Cache instance
+                Ok(instance)
             }
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     return Err(Error::NotFound);
                 }
-                Err(Error::IoError { error })
+                Err(Error::ProviderError(anyhow::anyhow!(error)))
             }
         }
     }

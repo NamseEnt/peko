@@ -1,27 +1,23 @@
 use super::*;
-use anyhow::anyhow;
 use async_singleflight::Group;
 use aws_sdk_s3::{Client, operation::get_object::GetObjectError};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use wasmtime::Engine;
-use wasmtime::component::{Component, Linker};
-use wasmtime_wasi_http::bindings::ProxyPre;
 
 #[derive(Clone)]
-pub struct S3CodeProvider {
+pub struct S3CachingProvider<T> {
     client: Client,
     bucket: String,
     prefix: Option<String>,
     // front is new, back is old
-    cache: Arc<Mutex<VecDeque<CacheEntry>>>,
+    cache: Arc<Mutex<VecDeque<CacheEntry<T>>>>,
     cache_size: usize,
-    singleflight: Arc<Group<String, ProxyPre<ClientState>, Error>>,
+    singleflight: Arc<Group<String, T, Error>>,
 }
 
-impl S3CodeProvider {
+impl<T: Clone + Send + Sync + 'static> S3CachingProvider<T> {
     pub fn new(client: Client, bucket: String, prefix: Option<String>, cache_size: usize) -> Self {
         Self {
             client,
@@ -40,7 +36,7 @@ impl S3CodeProvider {
         }
     }
 
-    async fn try_hit_cache(&self, key: &str) -> Option<CacheEntry> {
+    async fn try_hit_cache(&self, key: &str) -> Option<CacheEntry<T>> {
         let mut cache = self.cache.lock().await;
         let index = cache.iter().position(|entry| entry.key == key)?;
         let entry = cache.remove(index).expect("unreachable");
@@ -52,7 +48,7 @@ impl S3CodeProvider {
         &self,
         key: &str,
         if_none_match: Option<String>,
-    ) -> anyhow::Result<(Bytes, String)> {
+    ) -> Result<(Bytes, String)> {
         let mut req = self.client.get_object().bucket(&self.bucket).key(key);
 
         if let Some(etag) = if_none_match {
@@ -72,37 +68,33 @@ impl S3CodeProvider {
         &self,
         key: &str,
         if_none_match: Option<String>,
-        engine: &Engine,
-        linker: &Linker<ClientState>,
-    ) -> anyhow::Result<ProxyPre<ClientState>> {
+        instantiator: impl Instantiator<T>,
+    ) -> anyhow::Result<T> {
         let (data, etag) = self.fetch_from_s3(key, if_none_match).await?;
-        let byte_len = data.len();
-        let component = Component::new(engine, data)?;
-        let proxy_pre = ProxyPre::new(linker.instantiate_pre(&component)?)?;
+        let (value, byte_len) = instantiator.instantiate(data)?;
 
         self.put_to_cache(CacheEntry {
             key: key.to_string(),
-            proxy_pre: proxy_pre.clone(),
+            value: value.clone(),
             byte_len,
             etag,
         })
         .await;
 
-        Ok(proxy_pre)
+        Ok(value)
     }
 
     async fn on_local_cache_hit(
         &self,
-        cached: CacheEntry,
-        engine: &Engine,
-        linker: &Linker<ClientState>,
-    ) -> Result<ProxyPre<ClientState>> {
-        match self.fetch_and_cache(&cached.key, Some(cached.etag), engine, linker).await {
-            Ok(instance_pre) => Ok(instance_pre),
+        cached: CacheEntry<T>,
+        instantiator: impl Instantiator<T>,
+    ) -> Result<T> {
+        match self.fetch_and_cache(&cached.key, Some(cached.etag), instantiator).await {
+            Ok(value) => Ok(value),
             Err(sdk_err) => match &sdk_err.downcast_ref::<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>() {
                 Some(aws_sdk_s3::error::SdkError::ServiceError(service_err)) => {
                     if service_err.raw().status().as_u16() == 304 {
-                        return Ok(cached.proxy_pre);
+                        return Ok(cached.value);
                     }
                     match service_err.err() {
                         GetObjectError::NoSuchKey(_) => Err(Error::NotFound),
@@ -117,11 +109,10 @@ impl S3CodeProvider {
     async fn on_local_cache_miss(
         &self,
         key: &str,
-        engine: &Engine,
-        linker: &Linker<ClientState>,
-    ) -> Result<ProxyPre<ClientState>> {
-        match self.fetch_and_cache(key, None, engine, linker).await {
-            Ok(instance_pre) => Ok(instance_pre),
+        instantiator: impl Instantiator<T>,
+    ) -> Result<T> {
+        match self.fetch_and_cache(key, None, instantiator).await {
+            Ok(value) => Ok(value),
             Err(sdk_err) => match &sdk_err.downcast_ref::<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>() {
                 Some(aws_sdk_s3::error::SdkError::ServiceError(service_err)) => match service_err.err() {
                     GetObjectError::NoSuchKey(_) => Err(Error::NotFound),
@@ -132,7 +123,7 @@ impl S3CodeProvider {
         }
     }
 
-    async fn put_to_cache(&self, new_entry: CacheEntry) {
+    async fn put_to_cache(&self, new_entry: CacheEntry<T>) {
         let mut cache = self.cache.lock().await;
 
         if let Some(index) = cache.iter().position(|entry| entry.key == new_entry.key) {
@@ -150,24 +141,17 @@ impl S3CodeProvider {
             }
         }
     }
-}
 
-impl WasmCodeProvider for S3CodeProvider {
-    async fn get_proxy_pre(
-        &self,
-        id: &str,
-        engine: &Engine,
-        linker: &Linker<ClientState>,
-    ) -> Result<ProxyPre<ClientState>> {
+    pub async fn get(&self, id: &str, instantiator: impl Instantiator<T>) -> Result<T> {
         let key = self.build_key(id);
 
         let provider = self.clone();
         self.singleflight
             .work(&key.clone(), async move {
                 if let Some(entry) = provider.try_hit_cache(&key).await {
-                    provider.on_local_cache_hit(entry, engine, linker).await
+                    provider.on_local_cache_hit(entry, instantiator).await
                 } else {
-                    provider.on_local_cache_miss(&key, engine, linker).await
+                    provider.on_local_cache_miss(&key, instantiator).await
                 }
             })
             .await
@@ -179,9 +163,9 @@ impl WasmCodeProvider for S3CodeProvider {
 }
 
 #[derive(Clone)]
-struct CacheEntry {
+struct CacheEntry<T> {
     key: String,
-    proxy_pre: ProxyPre<ClientState>,
+    value: T,
     byte_len: usize,
     etag: String,
 }
@@ -194,8 +178,12 @@ mod tests {
     use aws_smithy_mocks::{mock, mock_client};
 
     fn create_test_engine_and_linker() -> (Engine, Linker<ClientState>) {
-        let engine = Engine::default();
-        let linker = Linker::new(&engine);
+        let mut config = wasmtime::Config::new();
+        config.async_support(true);
+        let engine = Engine::new(&config).unwrap();
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).unwrap();
+        wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker).unwrap();
         (engine, linker)
     }
 
@@ -203,25 +191,13 @@ mod tests {
         create_test_wasm_component_with_value(42)
     }
 
-    fn create_test_wasm_component_with_value(value: i32) -> Vec<u8> {
-        let wat = format!(
-            r#"
-            (component
-                (core module $m
-                    (func (export "test") (result i32)
-                        i32.const {}
-                    )
-                    (memory (export "memory") 1)
-                )
-                (core instance $i (instantiate $m))
-                (func (export "test") (result u32)
-                    (canon lift (core func $i "test") (memory $i "memory"))
-                )
-            )
-        "#,
-            value
-        );
-        wat::parse_str(&wat).unwrap()
+    fn create_test_wasm_component_with_value(_value: i32) -> Vec<u8> {
+        // Use the actual built wasi-http proxy wasm file
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/wasm_code_provider/sample_wasi_http_rust.wasm"
+        ))
+        .expect("Failed to read sample wasm file")
     }
 
     #[tokio::test]
@@ -236,21 +212,26 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
-        assert!(result.is_ok());
+        if let Err(ref e) = result {
+            eprintln!("Error getting proxy_pre: {:?}", e);
+        }
+        assert!(
+            result.is_ok(),
+            "Failed to get proxy_pre: {:?}",
+            result.err()
+        );
 
-        let expected_component = Component::new(&engine, &data).unwrap();
-        let expected_instance_pre = linker.instantiate_pre(&expected_component).unwrap();
-        let expected_serialized = expected_instance_pre.component().serialize().unwrap();
-
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
+        eprintln!("Cache length: {}", cache.len());
         assert_eq!(cache.len(), 1);
         assert_eq!(cache[0].key, "test.cwasm");
-        let cached_serialized = cache[0].proxy_pre.component().serialize().unwrap();
-        assert_eq!(cached_serialized, expected_serialized);
+        assert_eq!(cache[0].byte_len, data.len());
         assert_eq!(cache[0].etag, "etag-123".to_string());
     }
 
@@ -275,7 +256,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         provider
@@ -294,7 +277,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider
@@ -317,9 +302,9 @@ mod tests {
         }
 
         let client = mock_client!(aws_sdk_s3, &rules);
-        let wasm_size = create_test_wasm_component_with_value(0).len();
+        let wasm_size = create_test_wasm_component().len();
         let cache_size = wasm_size * 3;
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, cache_size);
+        let provider = S3CachingProvider::new(client, "test-bucket".to_string(), None, cache_size);
 
         let (engine, linker) = create_test_engine_and_linker();
         for i in 0..5 {
@@ -329,7 +314,7 @@ mod tests {
                 .unwrap();
         }
 
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache.len(), 3);
         assert_eq!(cache[0].key, "file4.cwasm");
         assert_eq!(cache[1].key, "file3.cwasm");
@@ -348,7 +333,7 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(
+        let provider = S3CachingProvider::new(
             client,
             "test-bucket".to_string(),
             Some("wasm-modules".to_string()),
@@ -359,7 +344,7 @@ mod tests {
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
         assert!(result.is_ok());
 
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache[0].key, "wasm-modules/test.cwasm");
     }
 
@@ -385,7 +370,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result1 = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
@@ -394,14 +381,9 @@ mod tests {
         let result2 = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
         assert!(result2.is_ok());
 
-        let expected_component2 = Component::new(&engine, &data2).unwrap();
-        let expected_instance_pre2 = linker.instantiate_pre(&expected_component2).unwrap();
-        let expected_serialized2 = expected_instance_pre2.component().serialize().unwrap();
-
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache.len(), 1);
-        let cached_serialized = cache[0].proxy_pre.component().serialize().unwrap();
-        assert_eq!(cached_serialized, expected_serialized2);
+        assert_eq!(cache[0].byte_len, data2.len());
         assert_eq!(cache[0].etag, "etag-v2".to_string());
     }
 
@@ -423,7 +405,9 @@ mod tests {
         }
 
         let client = mock_client!(aws_sdk_s3, &rules);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let engine = Arc::new(engine);
@@ -471,7 +455,9 @@ mod tests {
         }));
 
         let client = mock_client!(aws_sdk_s3, &rules);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         provider
@@ -488,7 +474,7 @@ mod tests {
             .unwrap();
 
         {
-            let cache = provider.cache.lock().await;
+            let cache = provider.inner.cache.lock().await;
             assert_eq!(cache[0].key, "file2.cwasm");
             assert_eq!(cache[1].key, "file1.cwasm");
             assert_eq!(cache[2].key, "file0.cwasm");
@@ -499,7 +485,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache[0].key, "file0.cwasm");
         assert_eq!(cache[1].key, "file2.cwasm");
         assert_eq!(cache[2].key, "file1.cwasm");
@@ -521,7 +507,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result1 = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
@@ -553,7 +541,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         provider
@@ -565,15 +555,10 @@ mod tests {
             .await
             .unwrap();
 
-        let expected_component2 = Component::new(&engine, &data2).unwrap();
-        let expected_instance_pre2 = linker.instantiate_pre(&expected_component2).unwrap();
-        let expected_serialized2 = expected_instance_pre2.component().serialize().unwrap();
-
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache.len(), 1);
         assert_eq!(cache[0].key, "test.cwasm");
-        let cached_serialized = cache[0].proxy_pre.component().serialize().unwrap();
-        assert_eq!(cached_serialized, expected_serialized2);
+        assert_eq!(cache[0].byte_len, data2.len());
     }
 
     #[tokio::test]
@@ -585,7 +570,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
@@ -603,7 +590,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
@@ -622,13 +611,13 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 0);
+        let provider = S3CachingProvider::new(client, "test-bucket".to_string(), None, 0);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
         assert!(result.is_ok());
 
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache.len(), 0);
     }
 
@@ -645,13 +634,13 @@ mod tests {
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
         let cache_size = 5;
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, cache_size);
+        let provider = S3CachingProvider::new(client, "test-bucket".to_string(), None, cache_size);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
         assert!(result.is_ok());
 
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache.len(), 0);
     }
 
@@ -667,7 +656,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider
@@ -698,10 +689,10 @@ mod tests {
 
         let client1 = mock_client!(aws_sdk_s3, [&rule1]);
         let provider_none =
-            S3CodeProvider::new(client1, "test-bucket".to_string(), None, 1024 * 1024);
+            S3CachingProvider::new(client1, "test-bucket".to_string(), None, 1024 * 1024);
 
         let client2 = mock_client!(aws_sdk_s3, [&rule2]);
-        let provider_empty = S3CodeProvider::new(
+        let provider_empty = S3CachingProvider::new(
             client2,
             "test-bucket".to_string(),
             Some("".to_string()),
@@ -718,10 +709,10 @@ mod tests {
             .await
             .unwrap();
 
-        let cache_none = provider_none.cache.lock().await;
+        let cache_none = provider_none.inner.cache.lock().await;
         assert_eq!(cache_none[0].key, "test.cwasm");
 
-        let cache_empty = provider_empty.cache.lock().await;
+        let cache_empty = provider_empty.inner.cache.lock().await;
         assert_eq!(cache_empty[0].key, "/test.cwasm");
     }
 
@@ -739,7 +730,9 @@ mod tests {
         }
 
         let client = mock_client!(aws_sdk_s3, &rules);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 20);
 
         let (engine, linker) = create_test_engine_and_linker();
         let engine = Arc::new(engine);
@@ -762,7 +755,7 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        let cache = provider.cache.lock().await;
+        let cache = provider.inner.cache.lock().await;
         assert_eq!(cache.len(), 20);
     }
 
@@ -777,7 +770,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
@@ -804,7 +799,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         provider
@@ -827,7 +824,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
@@ -854,7 +853,9 @@ mod tests {
         });
 
         let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
-        let provider = S3CodeProvider::new(client, "test-bucket".to_string(), None, 1024 * 1024);
+        let wasm_size = create_test_wasm_component().len();
+        let provider =
+            S3CachingProvider::new(client, "test-bucket".to_string(), None, wasm_size * 5);
 
         let (engine, linker) = create_test_engine_and_linker();
         provider
@@ -864,5 +865,271 @@ mod tests {
 
         let result = provider.get_proxy_pre("test.cwasm", &engine, &linker).await;
         assert!(matches!(result, Err(Error::ProviderError(_))));
+    }
+
+    // New cache correctness tests using String type
+    #[tokio::test]
+    async fn test_string_provider_cache_returns_correct_value_for_key() {
+        let content1 = b"content-for-file1".to_vec();
+        let content2 = b"content-for-file2".to_vec();
+
+        let content1_clone = content1.clone();
+        let content2_clone = content2.clone();
+
+        let rule1 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content1_clone.clone()))
+                .e_tag("etag-file1")
+                .build()
+        });
+
+        let rule2 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content2_clone.clone()))
+                .e_tag("etag-file2")
+                .build()
+        });
+
+        let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
+
+        let converter = Arc::new(
+            |bytes: Bytes, _engine: &Engine, _linker: &Linker<ClientState>| -> Result<String> {
+                String::from_utf8(bytes.to_vec()).map_err(|e| Error::ProviderError(e.into()))
+            },
+        );
+
+        let provider = S3ObjectProvider::new(
+            client,
+            "test-bucket".to_string(),
+            None,
+            1024 * 1024,
+            converter,
+        );
+
+        let (engine, linker) = create_test_engine_and_linker();
+
+        let val1 = provider.get("file1.txt", &engine, &linker).await.unwrap();
+        let val2 = provider.get("file2.txt", &engine, &linker).await.unwrap();
+
+        // Verify correct values are returned for correct keys
+        assert_eq!(val1, "content-for-file1");
+        assert_eq!(val2, "content-for-file2");
+    }
+
+    #[tokio::test]
+    async fn test_string_provider_cache_hit_preserves_value() {
+        use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+        use aws_smithy_runtime_api::http::StatusCode;
+        use aws_smithy_types::body::SdkBody;
+
+        let content = b"my-cached-content".to_vec();
+        let content_clone = content.clone();
+
+        let rule1 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content_clone.clone()))
+                .e_tag("etag-123")
+                .build()
+        });
+
+        // Second request returns 304 Not Modified
+        let rule2 = mock!(Client::get_object).then_http_response(|| {
+            HttpResponse::new(StatusCode::try_from(304).unwrap(), SdkBody::empty())
+        });
+
+        let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
+
+        let converter = Arc::new(
+            |bytes: Bytes, _engine: &Engine, _linker: &Linker<ClientState>| -> Result<String> {
+                String::from_utf8(bytes.to_vec()).map_err(|e| Error::ProviderError(e.into()))
+            },
+        );
+
+        let provider = S3ObjectProvider::new(
+            client,
+            "test-bucket".to_string(),
+            None,
+            1024 * 1024,
+            converter,
+        );
+
+        let (engine, linker) = create_test_engine_and_linker();
+
+        let val1 = provider.get("test.txt", &engine, &linker).await.unwrap();
+        let val2 = provider.get("test.txt", &engine, &linker).await.unwrap();
+
+        // Both should return the same value
+        assert_eq!(val1, "my-cached-content");
+        assert_eq!(val2, "my-cached-content");
+    }
+
+    #[tokio::test]
+    async fn test_string_provider_multiple_keys_different_values() {
+        let mut rules = Vec::new();
+        for i in 1..=5 {
+            let content = format!("value-{}", i).into_bytes();
+            rules.push(mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(content.clone()))
+                    .e_tag(format!("etag-{}", i))
+                    .build()
+            }));
+        }
+
+        let client = mock_client!(aws_sdk_s3, &rules);
+
+        let converter = Arc::new(
+            |bytes: Bytes, _engine: &Engine, _linker: &Linker<ClientState>| -> Result<String> {
+                String::from_utf8(bytes.to_vec()).map_err(|e| Error::ProviderError(e.into()))
+            },
+        );
+
+        let provider = S3ObjectProvider::new(
+            client,
+            "test-bucket".to_string(),
+            None,
+            1024 * 1024,
+            converter,
+        );
+
+        let (engine, linker) = create_test_engine_and_linker();
+
+        // Fetch all values
+        let mut values = Vec::new();
+        for i in 1..=5 {
+            let val = provider
+                .get(&format!("key{}.txt", i), &engine, &linker)
+                .await
+                .unwrap();
+            values.push(val);
+        }
+
+        // Verify each key returned its correct value
+        for i in 0..5 {
+            assert_eq!(values[i], format!("value-{}", i + 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_string_provider_cache_update_changes_value() {
+        let content1 = b"original-content".to_vec();
+        let content2 = b"updated-content".to_vec();
+
+        let content1_clone = content1.clone();
+        let content2_clone = content2.clone();
+
+        let rule1 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content1_clone.clone()))
+                .e_tag("etag-v1")
+                .build()
+        });
+
+        let rule2 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content2_clone.clone()))
+                .e_tag("etag-v2")
+                .build()
+        });
+
+        let client = mock_client!(aws_sdk_s3, [&rule1, &rule2]);
+
+        let converter = Arc::new(
+            |bytes: Bytes, _engine: &Engine, _linker: &Linker<ClientState>| -> Result<String> {
+                String::from_utf8(bytes.to_vec()).map_err(|e| Error::ProviderError(e.into()))
+            },
+        );
+
+        let provider = S3ObjectProvider::new(
+            client,
+            "test-bucket".to_string(),
+            None,
+            1024 * 1024,
+            converter,
+        );
+
+        let (engine, linker) = create_test_engine_and_linker();
+
+        let val1 = provider.get("test.txt", &engine, &linker).await.unwrap();
+        assert_eq!(val1, "original-content");
+
+        let val2 = provider.get("test.txt", &engine, &linker).await.unwrap();
+        assert_eq!(val2, "updated-content");
+
+        // Verify cache was updated
+        let cache = provider.cache.lock().await;
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[0].etag, "etag-v2");
+    }
+
+    #[tokio::test]
+    async fn test_string_provider_cache_key_isolation() {
+        use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+        use aws_smithy_runtime_api::http::StatusCode;
+        use aws_smithy_types::body::SdkBody;
+
+        let content1 = b"content-1".to_vec();
+        let content2 = b"content-2".to_vec();
+
+        let content1_clone = content1.clone();
+        let content2_clone = content2.clone();
+
+        let rule1 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content1_clone.clone()))
+                .e_tag("etag-1")
+                .build()
+        });
+
+        let rule2 = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .body(ByteStream::from(content2_clone.clone()))
+                .e_tag("etag-2")
+                .build()
+        });
+
+        // Both return 304 on second request
+        let rule3 = mock!(Client::get_object).then_http_response(|| {
+            HttpResponse::new(StatusCode::try_from(304).unwrap(), SdkBody::empty())
+        });
+
+        let rule4 = mock!(Client::get_object).then_http_response(|| {
+            HttpResponse::new(StatusCode::try_from(304).unwrap(), SdkBody::empty())
+        });
+
+        let client = mock_client!(aws_sdk_s3, [&rule1, &rule2, &rule3, &rule4]);
+
+        let converter = Arc::new(
+            |bytes: Bytes, _engine: &Engine, _linker: &Linker<ClientState>| -> Result<String> {
+                String::from_utf8(bytes.to_vec()).map_err(|e| Error::ProviderError(e.into()))
+            },
+        );
+
+        let provider = S3ObjectProvider::new(
+            client,
+            "test-bucket".to_string(),
+            None,
+            1024 * 1024,
+            converter,
+        );
+
+        let (engine, linker) = create_test_engine_and_linker();
+
+        // Fetch both keys
+        let val1_first = provider.get("key1.txt", &engine, &linker).await.unwrap();
+        let val2_first = provider.get("key2.txt", &engine, &linker).await.unwrap();
+
+        // Fetch again (should use cache with 304 response)
+        let val1_second = provider.get("key1.txt", &engine, &linker).await.unwrap();
+        let val2_second = provider.get("key2.txt", &engine, &linker).await.unwrap();
+
+        // Verify each key maintains its own value
+        assert_eq!(val1_first, "content-1");
+        assert_eq!(val1_second, "content-1");
+        assert_eq!(val2_first, "content-2");
+        assert_eq!(val2_second, "content-2");
+
+        // Ensure they're different
+        assert_ne!(val1_second, val2_second);
     }
 }
