@@ -1,0 +1,18 @@
+[package]
+name = "sample-wasi-http-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "component:sample-wasi-http-rust"
+# This tells cargo-component to use a special adapter, which doesn't depend on
+# `get-environment` or other things not present in the proxy world.
+proxy = true
+
+[dependencies]
+wit-bindgen-rt = { version = "0.41.0", features = ["bitflags"] }
+wstd = "0.5.4"
