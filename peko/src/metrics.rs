@@ -44,7 +44,7 @@ pub enum Metrics {
         code_id: String,
         cpu_time: std::time::Duration,
     },
-    CpuTimeOvered {
+    CpuTimeout {
         code_id: String,
         cpu_time: std::time::Duration,
     },

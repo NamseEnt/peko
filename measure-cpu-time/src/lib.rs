@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-pub trait Clock {
-    type Instant: Sub<Output = Duration> + Copy;
+pub trait Clock: Clone + Send + Sync + 'static {
+    type Instant: Sub<Output = Duration> + Copy + Send + Sync + 'static;
     fn now(&self) -> Self::Instant;
 }
 
@@ -27,11 +27,10 @@ pub struct MeasureCpuTime<F, C: Clock> {
     tracker: TimeTracker<C>,
     clock: C,
 }
-pub fn measure_cpu_time<F, C: Clock>(
-    tracker: TimeTracker<C>,
-    clock: C,
-    future: F,
-) -> MeasureCpuTime<F, C> {
+
+// Convenience function that uses the clock from the tracker
+pub fn measure_cpu_time<F, C: Clock>(tracker: TimeTracker<C>, future: F) -> MeasureCpuTime<F, C> {
+    let clock = (*tracker.clock).clone();
     MeasureCpuTime {
         future,
         tracker,
@@ -92,6 +91,12 @@ impl<C: Clock> TimeTracker<C> {
                 .as_ref()
                 .map(|last_start| self.clock.now() - *last_start)
                 .unwrap_or_default()
+    }
+}
+
+impl<C: Clock + Default> Default for TimeTracker<C> {
+    fn default() -> Self {
+        Self::new(C::default())
     }
 }
 
@@ -158,7 +163,7 @@ mod tests {
             42
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -171,13 +176,13 @@ mod tests {
     #[tokio::test]
     async fn test_measure_returns_correct_output_type() {
         let string_future = async { "hello".to_string() };
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker, string_future);
         let result = measured.await;
         assert_eq!(result, "hello");
 
         let vec_future = async { vec![1, 2, 3] };
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker, vec_future);
         let result = measured.await;
         assert_eq!(result, vec![1, 2, 3]);
@@ -186,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn test_measure_immediate_ready_future() {
         let future = async { 100 };
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -208,7 +213,7 @@ mod tests {
             100
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -221,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_yields_with_custom_future() {
         let future = yielding_future(5, 42);
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -247,7 +252,7 @@ mod tests {
             sum
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -275,7 +280,7 @@ mod tests {
                     i
                 };
 
-                let tracker = TimeTracker::default();
+                let tracker = TimeTracker::<SystemClock>::default();
                 let measured = measure_cpu_time(tracker.clone(), future);
                 let result = measured.await;
                 let elapsed = tracker.duration();
@@ -302,7 +307,7 @@ mod tests {
                     sleep(Duration::from_millis(1)).await;
                     i
                 };
-                let tracker = TimeTracker::default();
+                let tracker = TimeTracker::<SystemClock>::default();
                 let measured = measure_cpu_time(tracker.clone(), future);
                 let result = measured.await;
                 let elapsed = tracker.duration();
@@ -325,7 +330,7 @@ mod tests {
             42
         };
 
-        let inner_tracker = TimeTracker::default();
+        let inner_tracker = TimeTracker::<SystemClock>::default();
         let outer_future = async {
             let inner_measured = measure_cpu_time(inner_tracker.clone(), inner_future);
             let inner_result = inner_measured.await;
@@ -334,7 +339,7 @@ mod tests {
             (inner_result, inner_time)
         };
 
-        let outer_tracker = TimeTracker::default();
+        let outer_tracker = TimeTracker::<SystemClock>::default();
         let outer_measured = measure_cpu_time(outer_tracker.clone(), outer_future);
         let (result, inner_elapsed) = outer_measured.await;
         let outer_elapsed = outer_tracker.duration();
@@ -355,7 +360,7 @@ mod tests {
             Ok::<i32, String>(42)
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -371,7 +376,7 @@ mod tests {
             Err::<i32, String>("error occurred".to_string())
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -387,7 +392,7 @@ mod tests {
             None::<i32>
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -403,7 +408,7 @@ mod tests {
             panic!("intentional panic");
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker, future);
         let _ = measured.await;
     }
@@ -426,17 +431,17 @@ mod tests {
             3
         };
 
-        let tracker1 = TimeTracker::default();
+        let tracker1 = TimeTracker::<SystemClock>::default();
         let measured1 = measure_cpu_time(tracker1.clone(), future1);
         let result1 = measured1.await;
         let elapsed1 = tracker1.duration();
 
-        let tracker2 = TimeTracker::default();
+        let tracker2 = TimeTracker::<SystemClock>::default();
         let measured2 = measure_cpu_time(tracker2.clone(), future2);
         let result2 = measured2.await;
         let elapsed2 = tracker2.duration();
 
-        let tracker3 = TimeTracker::default();
+        let tracker3 = TimeTracker::<SystemClock>::default();
         let measured3 = measure_cpu_time(tracker3.clone(), future3);
         let result3 = measured3.await;
         let elapsed3 = tracker3.duration();
@@ -454,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn test_zero_duration_for_instant_completion() {
         let future = async { 1 + 1 };
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -479,17 +484,17 @@ mod tests {
             sleep(Duration::from_millis(5)).await;
         };
 
-        let tracker1 = TimeTracker::default();
+        let tracker1 = TimeTracker::<SystemClock>::default();
         let measured1 = measure_cpu_time(tracker1.clone(), future1);
         let _ = measured1.await;
         let elapsed1 = tracker1.duration();
 
-        let tracker2 = TimeTracker::default();
+        let tracker2 = TimeTracker::<SystemClock>::default();
         let measured2 = measure_cpu_time(tracker2.clone(), future2);
         let _ = measured2.await;
         let elapsed2 = tracker2.duration();
 
-        let tracker3 = TimeTracker::default();
+        let tracker3 = TimeTracker::<SystemClock>::default();
         let measured3 = measure_cpu_time(tracker3.clone(), future3);
         let _ = measured3.await;
         let elapsed3 = tracker3.duration();
@@ -510,7 +515,7 @@ mod tests {
             sleep(Duration::from_millis(5)).await;
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -526,7 +531,7 @@ mod tests {
             vec![0u8; 1_000_000]
         };
 
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -538,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn test_measure_empty_async_block() {
         let future = async {};
-        let tracker = TimeTracker::default();
+        let tracker = TimeTracker::<SystemClock>::default();
         let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
@@ -588,13 +593,172 @@ mod tests {
             42
         };
 
-        let tracker = TimeTracker::default();
-        let measured = measure_cpu_time_with_clock(tracker.clone(), clock, future);
+        let tracker = TimeTracker::new(clock.clone());
+        let measured = measure_cpu_time(tracker.clone(), future);
         let result = measured.await;
         let elapsed = tracker.duration();
 
         assert_eq!(result, 42);
         // We expect exactly 1 second because we manually advanced the clock
         assert_eq!(elapsed, Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_duration_accumulates_across_polls() {
+        // Test that duration() correctly accumulates time across multiple poll cycles
+        let start_time = Instant::now();
+        let clock = MockClock::new(start_time);
+
+        // Custom future that polls multiple times, advancing clock each time
+        struct MultiPollFuture {
+            clock: MockClock,
+            poll_count: u32,
+            max_polls: u32,
+        }
+
+        impl Future for MultiPollFuture {
+            type Output = u32;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.poll_count < self.max_polls {
+                    // Advance clock by 100ms each poll
+                    self.clock.advance(Duration::from_millis(100));
+                    self.poll_count += 1;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(self.poll_count)
+                }
+            }
+        }
+
+        let future = MultiPollFuture {
+            clock: clock.clone(),
+            poll_count: 0,
+            max_polls: 10,
+        };
+
+        let tracker = TimeTracker::new(clock.clone());
+        let measured = measure_cpu_time(tracker.clone(), future);
+
+        let result = measured.await;
+        let final_duration = tracker.duration();
+
+        assert_eq!(result, 10);
+        // Should have accumulated 10 * 100ms = 1000ms
+        assert!(
+            final_duration >= Duration::from_millis(1000),
+            "Expected >= 1000ms, got {:?}",
+            final_duration
+        );
+    }
+
+    #[tokio::test]
+    async fn test_duration_between_polls() {
+        // Test that duration() returns consistent values when called between polls
+        let start_time = Instant::now();
+        let clock = MockClock::new(start_time);
+
+        // Custom future that yields multiple times
+        struct YieldingFuture {
+            clock: MockClock,
+            poll_count: u32,
+        }
+
+        impl Future for YieldingFuture {
+            type Output = u32;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.poll_count < 5 {
+                    // Advance clock each poll
+                    self.clock.advance(Duration::from_millis(100));
+                    self.poll_count += 1;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(self.poll_count)
+                }
+            }
+        }
+
+        let tracker = TimeTracker::new(clock.clone());
+
+        let future = YieldingFuture {
+            clock: clock.clone(),
+            poll_count: 0,
+        };
+
+        let measured = measure_cpu_time(tracker.clone(), future);
+        let result = measured.await;
+        let final_duration = tracker.duration();
+
+        assert_eq!(result, 5);
+
+        // Final duration should be 5 * 100ms = 500ms
+        assert!(
+            final_duration >= Duration::from_millis(500),
+            "Expected >= 500ms, got {:?}",
+            final_duration
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_duration_access() {
+        // Test that multiple concurrent calls to duration() don't cause issues
+        let tracker = TimeTracker::<SystemClock>::default();
+
+        // Spawn multiple tasks that concurrently access duration()
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let tracker_clone = tracker.clone();
+            let handle = tokio::spawn(async move {
+                let mut durations = Vec::new();
+                for _ in 0..50 {
+                    durations.push(tracker_clone.duration());
+                    tokio::task::yield_now().await;
+                }
+                durations
+            });
+            handles.push(handle);
+        }
+
+        // Also run some work with the tracker
+        let work_tracker = tracker.clone();
+        let work_handle = tokio::spawn(async move {
+            let future = async {
+                for _ in 0..20 {
+                    tokio::time::sleep(Duration::from_micros(100)).await;
+                }
+            };
+            let measured = measure_cpu_time(work_tracker, future);
+            measured.await
+        });
+
+        // Collect all duration readings
+        let mut all_durations = Vec::new();
+        for handle in handles {
+            let durations = handle.await.unwrap();
+            all_durations.extend(durations);
+        }
+
+        work_handle.await.unwrap();
+        let final_duration = tracker.duration();
+
+        // All duration calls should complete without panicking
+        assert_eq!(
+            all_durations.len(),
+            500,
+            "Should have 500 duration readings"
+        );
+
+        // All durations should be valid (<= final duration)
+        for duration in &all_durations {
+            assert!(
+                *duration <= final_duration,
+                "Duration {:?} > final {:?}",
+                duration,
+                final_duration
+            );
+        }
     }
 }

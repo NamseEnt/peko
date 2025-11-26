@@ -7,6 +7,7 @@ use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use measure_cpu_time::SystemClock;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -32,6 +33,7 @@ async fn real_main() {
             adapt_cache::fs::FsAdaptCache::new("./tmp".into(), 1024 * 1024),
             job_rx,
             metrics::MetricsTx::new(),
+            SystemClock,
         )
         .run()
         .await;
@@ -59,7 +61,7 @@ async fn real_main() {
 
 async fn hello(
     request: Request<hyper::body::Incoming>,
-    job_tx: tokio::sync::mpsc::Sender<Job>,
+    job_tx: tokio::sync::mpsc::Sender<Job<hyper::body::Incoming>>,
 ) -> Result<Response, Infallible> {
     let (res_tx, res_rx) = tokio::sync::oneshot::channel();
     let _ = job_tx
