@@ -3,14 +3,17 @@ mod metrics;
 mod on_request;
 
 use crate::execute::{Job, Response};
-use hyper::Request;
 use hyper::server::conn::http1;
-use hyper::service::service_fn;
+use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
+use hyper_util::service::TowerToHyperService;
 use measure_cpu_time::SystemClock;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tower::ServiceBuilder;
+use tower_http::timeout::TimeoutLayer;
 
 fn main() {
     tokio::runtime::Runtime::new()
@@ -20,7 +23,7 @@ fn main() {
 
 async fn real_main() {
     let port = 3000;
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
 
     let listener = TcpListener::bind(addr)
         .await
@@ -39,6 +42,9 @@ async fn real_main() {
         .await;
     });
 
+    let timeout_layer =
+        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, Duration::from_secs(15));
+
     loop {
         let (stream, _) = listener
             .accept()
@@ -48,9 +54,17 @@ async fn real_main() {
         let io = TokioIo::new(stream);
 
         let job_tx = job_tx.clone();
+        let tower_service =
+            ServiceBuilder::new()
+                .layer(timeout_layer)
+                .service(tower::util::service_fn(move |req| {
+                    hello(req, job_tx.clone())
+                }));
+        let hyper_service = TowerToHyperService::new(tower_service);
+
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(|req| hello(req, job_tx.clone())))
+                .serve_connection(io, hyper_service)
                 .await
             {
                 eprintln!("Error serving connection: {:?}", err);
