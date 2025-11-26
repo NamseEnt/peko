@@ -1,31 +1,65 @@
 use std::future::Future;
+use std::ops::Sub;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-pub struct MeasureCpuTime<F> {
+pub trait Clock {
+    type Instant: Sub<Output = Duration> + Copy;
+    fn now(&self) -> Self::Instant;
+}
+
+#[derive(Clone, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    type Instant = Instant;
+
+    fn now(&self) -> Self::Instant {
+        Instant::now()
+    }
+}
+
+pub struct MeasureCpuTime<F, C = SystemClock> {
     future: F,
     tracker: TimeTracker,
+    clock: C,
 }
 
 pub fn measure_cpu_time<F>(tracker: TimeTracker, future: F) -> MeasureCpuTime<F> {
-    MeasureCpuTime { future, tracker }
+    MeasureCpuTime {
+        future,
+        tracker,
+        clock: SystemClock,
+    }
 }
 
-impl<F: Future> Future for MeasureCpuTime<F> {
+pub fn measure_cpu_time_with_clock<F, C: Clock>(
+    tracker: TimeTracker,
+    clock: C,
+    future: F,
+) -> MeasureCpuTime<F, C> {
+    MeasureCpuTime {
+        future,
+        tracker,
+        clock,
+    }
+}
+
+impl<F: Future, C: Clock> Future for MeasureCpuTime<F, C> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let start = Instant::now();
-
         let this = unsafe { self.get_unchecked_mut() };
+        let start = this.clock.now();
 
         let future = unsafe { Pin::new_unchecked(&mut this.future) };
         let result = future.poll(cx);
 
-        let elapsed = start.elapsed();
+        let end = this.clock.now();
+        let elapsed = end - start;
         this.tracker
             .inner
             .fetch_add(elapsed.as_nanos() as usize, Ordering::Relaxed);
@@ -499,5 +533,55 @@ mod tests {
         assert_eq!(result, ());
         // Even an empty block should have some measurement overhead
         assert!(elapsed.as_nanos() < 1_000_000); // Less than 1ms
+    }
+
+    // Category 7: Mocking Tests
+
+    #[derive(Clone)]
+    struct MockClock {
+        now: Arc<std::sync::Mutex<Instant>>,
+    }
+
+    impl MockClock {
+        fn new(start_time: Instant) -> Self {
+            Self {
+                now: Arc::new(std::sync::Mutex::new(start_time)),
+            }
+        }
+
+        fn advance(&self, duration: Duration) {
+            let mut now = self.now.lock().unwrap();
+            *now += duration;
+        }
+    }
+
+    impl Clock for MockClock {
+        type Instant = Instant;
+
+        fn now(&self) -> Self::Instant {
+            *self.now.lock().unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_measure_with_mock_clock() {
+        let start_time = Instant::now();
+        let clock = MockClock::new(start_time);
+        let clock_clone = clock.clone();
+
+        let future = async move {
+            // Simulate work by advancing the clock
+            clock_clone.advance(Duration::from_secs(1));
+            42
+        };
+
+        let tracker = TimeTracker::default();
+        let measured = measure_cpu_time_with_clock(tracker.clone(), clock, future);
+        let result = measured.await;
+        let elapsed = tracker.duration();
+
+        assert_eq!(result, 42);
+        // We expect exactly 1 second because we manually advanced the clock
+        assert_eq!(elapsed, Duration::from_secs(1));
     }
 }
