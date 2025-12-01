@@ -60,3 +60,47 @@
 - [ ] github pages + docusaurus + Algolia DocSearch
 - [ ] one-click on-web deployment demo
 - [ ] ls-news for showcase
+
+## metrics monitoring
+
+- [ ] grafana
+- [ ] new relic
+- [ ] oci monitoring
+
+## server-side rendering support
+
+- [ ] astro ssr
+
+## deployment
+
+- [ ] green-blue
+- [ ] rolling
+
+## operator dashboard
+
+- [ ] manual operation
+  - [ ] limit or set number of
+    - [ ] scale in time
+    - [ ] max terminated instance in time
+    - [ ] scale out time
+    - [ ] max instance count
+    - [ ] max new instance in time
+  - [ ] toggle zombie killing
+  - [ ] toggle auto scaling
+
+## client dashboard of peko cloud
+
+## iaac
+
+- [ ] pulumi
+
+## code id
+
+- [*] parse code id from url
+- [ ] register asterisk domain in dns
+- [ ] master(in-memory) code id whitelist to reduce storage request cost
+
+## master worker election
+
+- [ ] memberlist based, (birth time + id)'s oldest worker is master
+- [ ] in-memory database

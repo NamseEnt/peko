@@ -1,7 +1,7 @@
 mod execute;
 mod list_neighbors;
 mod metrics;
-mod on_request;
+mod on_fn_call;
 mod warm_up_map;
 
 use crate::execute::{Job, Response};
@@ -36,16 +36,20 @@ async fn real_main() {
         .unwrap_or_else(|_| panic!("Failed to bind listener on port {port}"));
 
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(10 * 1024);
+    let metrics_tx = metrics::MetricsTx::new();
 
-    tokio::spawn(async move {
-        execute::Executor::new(
-            adapt_cache::fs::FsAdaptCache::new("./tmp".into(), 1024 * 1024),
-            job_rx,
-            metrics::MetricsTx::new(),
-            SystemClock,
-        )
-        .run()
-        .await;
+    tokio::spawn({
+        let metrics_tx = metrics_tx.clone();
+        async move {
+            execute::Executor::new(
+                adapt_cache::fs::FsAdaptCache::new("./tmp".into(), 1024 * 1024),
+                job_rx,
+                metrics_tx.clone(),
+                SystemClock,
+            )
+            .run()
+            .await;
+        }
     });
 
     let timeout_layer =
@@ -60,15 +64,21 @@ async fn real_main() {
         let io = TokioIo::new(stream);
 
         let job_tx = job_tx.clone();
+        let metrics_tx = metrics_tx.clone();
+
         let tower_service =
             ServiceBuilder::new()
                 .layer(timeout_layer)
                 .service(tower::util::service_fn(
                     move |req: Request<hyper::body::Incoming>| {
                         let job_tx = job_tx.clone();
+                        let metrics_tx = metrics_tx.clone();
                         async move {
                             match req.uri().path() {
-                                "/fn_call" => fn_call(req, job_tx.clone()).await,
+                                "/fn_call" => {
+                                    on_fn_call::on_fn_call(req, job_tx.clone(), metrics_tx.clone())
+                                        .await
+                                }
                                 "/role" => role().await,
                                 _ => {
                                     let body = http_body_util::Full::new(Bytes::from("Not found"))
@@ -95,24 +105,23 @@ async fn real_main() {
     }
 }
 
-async fn fn_call(
-    request: Request<hyper::body::Incoming>,
-    job_tx: tokio::sync::mpsc::Sender<Job<hyper::body::Incoming>>,
-) -> Result<Response, Infallible> {
-    let (res_tx, res_rx) = tokio::sync::oneshot::channel();
-    let _ = job_tx
-        .send(Job {
-            req: request,
-            res_tx,
-            code_id: "todo".to_string(),
-        })
-        .await;
-    Ok(res_rx.await.unwrap())
-}
-
 async fn role() -> Result<Response, Infallible> {
     let body = http_body_util::Full::new(Bytes::from("worker"))
         .map_err(|_| ErrorCode::InternalError(None));
     let res = hyper::Response::new(HyperOutgoingBody::new(body));
     Ok(res)
+}
+
+fn response(status: hyper::StatusCode, body: Bytes) -> Response {
+    let body = http_body_util::Full::new(body).map_err(|_| ErrorCode::InternalError(None));
+    let mut res = hyper::Response::new(HyperOutgoingBody::new(body));
+    *res.status_mut() = status;
+    res
+}
+
+fn internal_error_response() -> Response {
+    response(
+        hyper::StatusCode::INTERNAL_SERVER_ERROR,
+        Bytes::from("Internal Server Error"),
+    )
 }

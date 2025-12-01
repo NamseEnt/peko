@@ -1,7 +1,9 @@
-use crate::metrics::{Metrics, MetricsTx};
+use crate::{
+    metrics::{Metrics, MetricsTx},
+    *,
+};
 use adapt_cache::AdaptCache;
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use hyper::body::Body;
 use measure_cpu_time::{Clock, TimeTracker, measure_cpu_time};
 use std::{
@@ -344,20 +346,11 @@ where
     internal_error_response()
 }
 
-fn internal_error_response() -> Response {
-    let body = http_body_util::Full::new(Bytes::from("Internal Server Error"))
-        .map_err(|_| ErrorCode::InternalError(None));
-    let mut res = hyper::Response::new(HyperOutgoingBody::new(body));
-    *res.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-    res
-}
-
 fn timeout_response() -> Response {
-    let body = http_body_util::Full::new(Bytes::from("Gateway Timeout"))
-        .map_err(|_| ErrorCode::InternalError(None));
-    let mut res = hyper::Response::new(HyperOutgoingBody::new(body));
-    *res.status_mut() = hyper::StatusCode::GATEWAY_TIMEOUT;
-    res
+    response(
+        hyper::StatusCode::GATEWAY_TIMEOUT,
+        Bytes::from("Gateway Timeout"),
+    )
 }
 
 pub struct ClientState<C: Clock> {
@@ -824,8 +817,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             {
                 let metrics = test_metrics.metrics.lock().unwrap();
-                let has_cpu_timeout = metrics.iter().any(|m| matches!(m, Metrics::CpuTimeout { .. }));
-                assert!(!has_cpu_timeout, "CpuTimeout should not be recorded for wstd sleep");
+                let has_cpu_timeout = metrics
+                    .iter()
+                    .any(|m| matches!(m, Metrics::CpuTimeout { .. }));
+                assert!(
+                    !has_cpu_timeout,
+                    "CpuTimeout should not be recorded for wstd sleep"
+                );
             }
 
             // Verify CpuTime metric was recorded with low CPU time
@@ -925,7 +923,10 @@ mod tests {
             // Drop the receiver immediately to simulate hyper connection drop
             drop(rx);
 
-            let req = store.data_mut().new_incoming_request(Scheme::Http, req).unwrap();
+            let req = store
+                .data_mut()
+                .new_incoming_request(Scheme::Http, req)
+                .unwrap();
             let out = store.data_mut().new_response_outparam(tx).unwrap();
 
             let proxy = proxy_pre.instantiate_async(&mut store).await.unwrap();
@@ -1006,7 +1007,10 @@ mod tests {
 
             let (tx, rx) = tokio::sync::oneshot::channel();
 
-            let req = store.data_mut().new_incoming_request(Scheme::Http, req).unwrap();
+            let req = store
+                .data_mut()
+                .new_incoming_request(Scheme::Http, req)
+                .unwrap();
             let out = store.data_mut().new_response_outparam(tx).unwrap();
 
             let proxy = proxy_pre.instantiate_async(&mut store).await.unwrap();
@@ -1091,7 +1095,10 @@ mod tests {
 
             let (tx, rx) = tokio::sync::oneshot::channel();
 
-            let req = store.data_mut().new_incoming_request(Scheme::Http, req).unwrap();
+            let req = store
+                .data_mut()
+                .new_incoming_request(Scheme::Http, req)
+                .unwrap();
             let out = store.data_mut().new_response_outparam(tx).unwrap();
 
             let proxy = proxy_pre.instantiate_async(&mut store).await.unwrap();
@@ -1178,7 +1185,10 @@ mod tests {
             store.epoch_deadline_async_yield_and_update(1);
 
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let req = store.data_mut().new_incoming_request(Scheme::Http, req).unwrap();
+            let req = store
+                .data_mut()
+                .new_incoming_request(Scheme::Http, req)
+                .unwrap();
             let out = store.data_mut().new_response_outparam(tx).unwrap();
             let proxy = proxy_pre.instantiate_async(&mut store).await.unwrap();
 

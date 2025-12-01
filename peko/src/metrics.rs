@@ -66,4 +66,5 @@ pub enum Metrics {
         code_id: String,
         error: adapt_cache::Error<anyhow::Error>,
     },
+    CodeIdParseError,
 }
