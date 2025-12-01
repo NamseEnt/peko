@@ -84,6 +84,23 @@ impl Region {
     pub fn endpoint(&self, service: &str) -> String {
         format!("https://{}.{}.oci.oraclecloud.com", service, self.id())
     }
+
+    /// Get the endpoint for the Resource Search service in this region.
+    ///
+    /// The Resource Search service uses a different endpoint pattern than other services,
+    /// with the `query` subdomain instead of a service-specific subdomain.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use oci_rust_sdk::core::region::Region;
+    ///
+    /// let endpoint = Region::ApSeoul1.query_endpoint();
+    /// assert_eq!(endpoint, "https://query.ap-seoul-1.oci.oraclecloud.com");
+    /// ```
+    pub fn query_endpoint(&self) -> String {
+        format!("https://query.{}.oci.oraclecloud.com", self.id())
+    }
 }
 
 impl std::str::FromStr for Region {

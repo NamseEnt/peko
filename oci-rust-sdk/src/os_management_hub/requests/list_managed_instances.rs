@@ -155,7 +155,10 @@ impl ListManagedInstancesRequest {
             params.push(("lifecycleStageNotEqualTo".to_string(), v.clone()));
         }
         if let Some(v) = self.is_attached_to_group_or_lifecycle_stage {
-            params.push(("isAttachedToGroupOrLifecycleStage".to_string(), v.to_string()));
+            params.push((
+                "isAttachedToGroupOrLifecycleStage".to_string(),
+                v.to_string(),
+            ));
         }
         if let Some(ref v) = self.software_source_id {
             params.push(("softwareSourceId".to_string(), v.clone()));

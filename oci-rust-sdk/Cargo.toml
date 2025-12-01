@@ -8,6 +8,8 @@ authors = ["OCI Rust SDK Contributors"]
 [features]
 default = []
 os_management_hub = []
+resource_search = []
+virtual_network = []
 
 [dependencies]
 reqwest = { version = "0.12", features = [
@@ -30,11 +32,23 @@ anyhow = "1"
 configparser = "3"
 dirs = "5"
 urlencoding = "2"
+x509-parser = "0.16"
+jsonwebtoken = "9"
+parking_lot = "0.12"
+rand = "0.8"
 
 [dev-dependencies]
-rand = "0.8"
 tokio = { version = "1", features = ["test-util"] }
+mockito = "1"
 
 [[example]]
 name = "using_traits"
 required-features = ["os_management_hub"]
+
+[[example]]
+name = "resource_search"
+required-features = ["resource_search"]
+
+[[example]]
+name = "list_public_ips"
+required-features = ["virtual_network"]
