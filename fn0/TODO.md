@@ -15,6 +15,7 @@
 
 ## auto scaling, zombie killer
 
+- [ ] cloudflare workers, d1, scheduling by master
 - [ ] aws lambda, cron using aws eventbridge scheduler, state store using s3
 
 ## ping specific worker
