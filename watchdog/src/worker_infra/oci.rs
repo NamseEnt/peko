@@ -10,14 +10,12 @@ pub struct OciWorkerInfra {
 
 impl OciWorkerInfra {
     pub fn new() -> Self {
-        let private_key_base64 = std::env::var("OCI_PRIVATE_KEY_BASE64")
-            .expect("env var OCI_PRIVATE_KEY_BASE64 is not set");
-        let user_id = std::env::var("OCI_USER_ID").expect("env var OCI_USER_ID is not set");
-        let fingerprint =
-            std::env::var("OCI_FINGERPRINT").expect("env var OCI_FINGERPRINT is not set");
-        let tenancy_id =
-            std::env::var("OCI_TENANCY_ID").expect("env var OCI_TENANCY_ID is not set");
-        let region = std::env::var("OCI_REGION").expect("env var OCI_REGION is not set");
+        let private_key_base64 =
+            env::var("OCI_PRIVATE_KEY_BASE64").expect("env var OCI_PRIVATE_KEY_BASE64 is not set");
+        let user_id = env::var("OCI_USER_ID").expect("env var OCI_USER_ID is not set");
+        let fingerprint = env::var("OCI_FINGERPRINT").expect("env var OCI_FINGERPRINT is not set");
+        let tenancy_id = env::var("OCI_TENANCY_ID").expect("env var OCI_TENANCY_ID is not set");
+        let region = env::var("OCI_REGION").expect("env var OCI_REGION is not set");
         let compartment_id =
             env::var("OCI_COMPARTMENT_ID").expect("env var OCI_COMPARTMENT_ID is not set");
 

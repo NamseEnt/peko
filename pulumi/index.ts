@@ -1,16 +1,16 @@
 import * as pulumi from "@pulumi/pulumi";
 
 export interface fn0Args {
-  value: pulumi.Input<string>;
-  count: pulumi.Input<number>;
+  cdn: pulumi.Input<string>;
+  location: pulumi.Input<OciLocation>;
 }
 
-class fn0 extends pulumi.ComponentResource {
+export class fn0 extends pulumi.ComponentResource {
   constructor(
     name: string,
     args: fn0Args,
     opts: pulumi.ComponentResourceOptions
   ) {
-    super("pkg:index:fn0", name, {}, opts);
+    super("pkg:index:fn0", name, args, opts);
   }
 }

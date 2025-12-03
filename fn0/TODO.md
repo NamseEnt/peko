@@ -22,6 +22,7 @@
 
 - [ ] via public ip directly
 - [ ] via cloudflare
+- [ ] from aws using ipv6 egress only internet gateway
 
 ## rate limit, throttle
 
@@ -109,3 +110,8 @@
 ## outgoing http connection pool
 
 - [ ] hard limit for each wasm instance
+
+## health check
+
+- [ ] endpoint
+- [ ] status: graceful shutting down

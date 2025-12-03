@@ -4,7 +4,7 @@ mod metrics;
 mod on_fn_call;
 mod warm_up_map;
 
-use crate::execute::{Job, Response};
+use crate::execute::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;
@@ -80,6 +80,7 @@ async fn real_main() {
                                         .await
                                 }
                                 "/role" => role().await,
+                                "/health" => health().await,
                                 _ => {
                                     let body = http_body_util::Full::new(Bytes::from("Not found"))
                                         .map_err(|_| ErrorCode::InternalError(None));
@@ -106,10 +107,11 @@ async fn real_main() {
 }
 
 async fn role() -> Result<Response, Infallible> {
-    let body = http_body_util::Full::new(Bytes::from("worker"))
-        .map_err(|_| ErrorCode::InternalError(None));
-    let res = hyper::Response::new(HyperOutgoingBody::new(body));
-    Ok(res)
+    Ok(response(StatusCode::OK, Bytes::from("worker")))
+}
+
+async fn health() -> Result<Response, Infallible> {
+    Ok(response(StatusCode::OK, Bytes::from("I feel good")))
 }
 
 fn response(status: hyper::StatusCode, body: Bytes) -> Response {

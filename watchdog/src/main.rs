@@ -87,7 +87,6 @@ async fn run_watchdog(
     worker_infra: Arc<dyn WorkerInfra>,
 ) -> anyhow::Result<()> {
     let domain = env::var("DOMAIN").expect("env var DOMAIN is not set");
-
     let max_graceful_shutdown_wait_secs = env::var("MAX_GRACEFUL_SHUTDOWN_WAIT_SECS")
         .expect("MAX_GRACEFUL_SHUTDOWN_WAIT_SECS must be set")
         .parse::<u64>()
