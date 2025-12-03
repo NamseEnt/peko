@@ -68,7 +68,7 @@ impl WorkerInfra for OciWorkerInfra {
                         display_name: None,
                         sort_by: None,
                         sort_order: None,
-                        lifecycle_state: Some(LifecycleState::Running),
+                        lifecycle_state: None,
                     })
                     .await?;
 
@@ -81,6 +81,18 @@ impl WorkerInfra for OciWorkerInfra {
                         };
                         Some(ip)
                     }),
+                    instance_state: match instance.lifecycle_state {
+                        LifecycleState::Provisioning | LifecycleState::Starting => {
+                            WorkerInstanceState::Starting
+                        }
+                        LifecycleState::Running => WorkerInstanceState::Running,
+                        LifecycleState::Stopping
+                        | LifecycleState::Stopped
+                        | LifecycleState::Terminating
+                        | LifecycleState::Terminated => WorkerInstanceState::Terminating,
+                        LifecycleState::Moving | LifecycleState::CreatingImage => unreachable!(),
+                    },
+                    instance_created: instance.time_created,
                 }));
 
                 if let Some(next_page) = response.opc_next_page {

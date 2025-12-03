@@ -2994,6 +2994,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
  "base64 0.22.1",
+ "chrono",
  "futures",
  "oci-rust-sdk",
  "reqwest",

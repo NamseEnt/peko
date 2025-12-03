@@ -41,11 +41,14 @@ mod health_recorder;
 mod lock;
 mod worker_infra;
 
-use crate::{health_recorder::HealthRecord, worker_infra::WorkerInfo};
+use crate::{
+    health_recorder::{HealthRecords, update_health_records},
+    worker_infra::{WorkerHealthResponseMap, WorkerInstanceState},
+};
 use futures::{FutureExt, StreamExt};
 use health_recorder::HealthRecorder;
 use lock::Lock;
-use std::{collections::BTreeMap, env, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{env, sync::Arc};
 use worker_infra::{WorkerInfra, oci::OciWorkerInfra};
 
 #[derive(
@@ -58,15 +61,15 @@ struct WorkerId(String);
 fn main() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let lock_at = env::var("LOCK_AT").expect("env var LOCK_AT is not set");
-        let lock: Box<dyn Lock> = match lock_at.as_str() {
-            "dynamodb" => Box::new(lock::dynamodb::DynamoDbLock::new().await),
+        let lock: Arc<dyn Lock> = match lock_at.as_str() {
+            "dynamodb" => Arc::new(lock::dynamodb::DynamoDbLock::new().await),
             _ => panic!("unknown lock type {lock_at}"),
         };
 
         let health_recorder_at =
             env::var("HEALTH_RECORDER_AT").expect("env var HEALTH_RECORDER_AT is not set");
-        let health_recorder: Box<dyn HealthRecorder> = match health_recorder_at.as_str() {
-            "s3" => Box::new(health_recorder::s3::S3HealthRecorder::new().await),
+        let health_recorder: Arc<dyn HealthRecorder> = match health_recorder_at.as_str() {
+            "s3" => Arc::new(health_recorder::s3::S3HealthRecorder::new().await),
             _ => panic!("unknown health recorder type {health_recorder_at}"),
         };
 
@@ -77,13 +80,13 @@ fn main() {
             _ => panic!("unknown worker infra type {worker_infra_at}"),
         };
 
-        let _result = run_watchdog(lock.as_ref(), health_recorder.as_ref(), worker_infra).await;
+        let _result = run_watchdog(lock, health_recorder, worker_infra).await;
     });
 }
 
 async fn run_watchdog(
-    lock: &dyn Lock,
-    health_recorder: &dyn HealthRecorder,
+    lock: Arc<dyn Lock>,
+    health_recorder: Arc<dyn HealthRecorder>,
     worker_infra: Arc<dyn WorkerInfra>,
 ) -> anyhow::Result<()> {
     let domain = env::var("DOMAIN").expect("env var DOMAIN is not set");
@@ -95,173 +98,138 @@ async fn run_watchdog(
         .expect("MAX_HEALTHY_CHECK_RETRIES must be set")
         .parse::<usize>()
         .unwrap();
+    let max_start_timeout_secs = env::var("MAX_START_TIMEOUT_SECS")
+        .expect("MAX_START_TIMEOUT_SECS must be set")
+        .parse::<u64>()
+        .unwrap();
+    let max_starting_count = env::var("MAX_STARTING_COUNT")
+        .expect("MAX_STARTING_COUNT must be set")
+        .parse::<usize>()
+        .unwrap();
 
     if !lock.try_lock().await? {
         println!("Failed to get lock");
         return Ok(());
     }
 
-    let (health_records, health_responses) = futures::try_join!(
+    let (health_records, worker_health_response_map) = futures::try_join!(
         health_recorder.read_all(),
-        get_worker_health_responses(&domain, worker_infra.as_ref())
+        worker_infra.get_worker_health_responses(&domain)
     )?;
 
     let now_secs = now_secs();
 
-    let mut next_health_records = health_records.clone();
-    let mut workers_to_terminate = vec![];
-
-    for worker_id in health_records.keys() {
-        let health_record = next_health_records.get_mut(worker_id).unwrap();
-        let Some((worker_info, worker_status)) = health_responses.get(worker_id) else {
-            next_health_records.remove(worker_id);
-            continue;
-        };
-
-        match worker_status {
-            Some(worker_status) => match worker_status {
-                WorkerStatus::Good => {
-                    health_record.health_check_retrials = 0;
-                    health_record.graceful_shutdown_start_at = None;
-                }
-                WorkerStatus::ShuttingDown => {
-                    if health_record.graceful_shutdown_start_at.is_none() {
-                        health_record.graceful_shutdown_start_at = Some(now_secs);
-                    }
-                    if now_secs
-                        < health_record.graceful_shutdown_start_at.unwrap()
-                            + max_graceful_shutdown_wait_secs
-                    {
-                        workers_to_terminate.push(worker_info.clone());
-                    }
-                }
-            },
-            None => {
-                health_record.health_check_retrials += 1;
-
-                if health_record.health_check_retrials >= max_healthy_check_retrials {
-                    workers_to_terminate.push(worker_info.clone());
-                }
-            }
-        }
-    }
-
-    for (worker_id, (_worker_info, worker_status)) in health_responses {
-        if health_records.contains_key(&worker_id) {
-            continue;
-        }
-
-        match worker_status {
-            Some(worker_status) => match worker_status {
-                WorkerStatus::Good => {
-                    next_health_records.insert(
-                        worker_id,
-                        HealthRecord {
-                            health_check_retrials: 0,
-                            graceful_shutdown_start_at: None,
-                        },
-                    );
-                }
-                WorkerStatus::ShuttingDown => {
-                    next_health_records.insert(
-                        worker_id,
-                        HealthRecord {
-                            health_check_retrials: 0,
-                            graceful_shutdown_start_at: Some(now_secs),
-                        },
-                    );
-                }
-            },
-            None => {
-                next_health_records.insert(
-                    worker_id,
-                    HealthRecord {
-                        health_check_retrials: 1,
-                        graceful_shutdown_start_at: None,
-                    },
-                );
-            }
-        }
-    }
-
-    let terminate_handles = workers_to_terminate.into_iter().map(|worker_info| {
-        let worker_id = worker_info.id.clone();
-        let worker_infra = worker_infra.clone();
-        tokio::spawn(async move {
-            if let Err(e) = worker_infra.terminate(&worker_id).await {
-                println!("Failed to terminate worker {worker_id:?}: {e}");
-            }
-        })
-    });
-
-    futures::future::try_join(
-        health_recorder.write_all(next_health_records),
-        futures::future::join_all(terminate_handles).map(|_| Ok(())),
+    let (next_health_records, workers_to_terminate) = update_health_records(
+        now_secs,
+        health_records,
+        worker_health_response_map.clone(),
+        max_graceful_shutdown_wait_secs,
+        max_healthy_check_retrials,
     )
     .await?;
+
+    let terminate_handles =
+        futures::stream::iter(workers_to_terminate).for_each_concurrent(16, |worker_info| {
+            let worker_infra = worker_infra.clone();
+            async move {
+                if let Err(e) = worker_infra.terminate(&worker_info.id).await {
+                    println!("Failed to terminate worker {:?}: {e}", worker_info.id);
+                }
+            }
+        });
+
+    futures::try_join!(
+        health_recorder.write_all(next_health_records.clone()),
+        try_scale_out(
+            now_secs,
+            max_start_timeout_secs,
+            max_starting_count,
+            next_health_records,
+            worker_health_response_map,
+            worker_infra.clone(),
+        ),
+        terminate_handles.then(|_| async { Ok(()) }),
+    )?;
 
     Ok(())
 }
 
-async fn get_worker_health_responses(
-    domain: &str,
-    worker_infra: &dyn WorkerInfra,
-) -> anyhow::Result<BTreeMap<WorkerId, (WorkerInfo, Option<WorkerStatus>)>> {
-    let workers_infos = worker_infra.get_worker_infos().await?;
-    Ok(futures::stream::iter(workers_infos)
-        .map(|worker_info| async move {
-            let Some(ip) = worker_info.ip else {
-                return (worker_info.id.clone(), (worker_info, None));
-            };
-            let addr = SocketAddr::new(ip, 443);
-            let Ok(res) = reqwest::Client::builder()
-                .resolve(domain, addr)
-                .timeout(Duration::from_secs(2))
-                .build()
-                .unwrap()
-                .get(format!("https://{domain}/health"))
-                .send()
-                .await
-            else {
-                return (worker_info.id.clone(), (worker_info, None));
-            };
+async fn try_scale_out(
+    now_secs: u64,
+    max_start_timeout_secs: u64,
+    max_starting_count: usize,
+    health_records: HealthRecords,
+    worker_health_response_map: WorkerHealthResponseMap,
+    worker_infra: Arc<dyn WorkerInfra>,
+) -> anyhow::Result<()> {
+    let starting_workers = worker_health_response_map
+        .values()
+        .filter(|(info, _status)| matches!(info.instance_state, WorkerInstanceState::Starting))
+        .map(|(info, _status)| info);
 
-            if !res.status().is_success() {
-                return (worker_info.id.clone(), (worker_info, None));
+    let (old_starting_workers, fresh_starting_workers): (Vec<_>, Vec<_>) = starting_workers
+        .partition(|info| {
+            now_secs as i64 - info.instance_created.timestamp() > max_start_timeout_secs as i64
+        });
+
+    let terminate_olds =
+        futures::stream::iter(old_starting_workers).for_each_concurrent(16, |info| {
+            let worker_infra = worker_infra.clone();
+            async move {
+                let _ = worker_infra.terminate(&info.id).await;
             }
+        });
 
-            let Ok(body) = res.text().await else {
-                return (worker_info.id.clone(), (worker_info, None));
-            };
+    let start_new = async move {
+        let Some(_left_starting_count) =
+            max_starting_count.checked_sub(fresh_starting_workers.len())
+        else {
+            return;
+        };
 
-            let Ok(worker_status) = body.parse::<WorkerStatus>() else {
-                panic!("Failed to parse health response: {body}");
-            };
+        // TODO: 정상인 워커가 1개도 없으면 1개 시작해라.
 
-            (worker_info.id.clone(), (worker_info, Some(worker_status)))
-        })
-        .buffer_unordered(32)
-        .collect()
-        .await)
-}
-
-enum WorkerStatus {
-    Good,
-    ShuttingDown,
-}
-
-impl FromStr for WorkerStatus {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "good" => Ok(WorkerStatus::Good),
-            "shutting_down" => Ok(WorkerStatus::ShuttingDown),
-            _ => anyhow::bail!("invalid health response: {}", s),
+        if !fresh_starting_workers.is_empty() {
+            return;
         }
-    }
+
+        // 그러러면 health_records 를 체크해서 정상인게 없는지 보면 되겠지.
+    };
+
+    futures::join!(terminate_olds, start_new);
+
+    Ok(())
 }
 
 fn now_secs() -> u64 {
     std::time::UNIX_EPOCH.elapsed().unwrap().as_secs()
+}
+
+struct GeneralEnv {
+    max_graceful_shutdown_wait_secs: u64,
+    max_healthy_check_retrials: usize,
+    max_start_timeout_secs: u64,
+    max_starting_count: usize,
+}
+impl GeneralEnv {
+    fn new() -> Self {
+        Self {
+            max_graceful_shutdown_wait_secs: env::var("MAX_GRACEFUL_SHUTDOWN_WAIT_SECS")
+                .expect("MAX_GRACEFUL_SHUTDOWN_WAIT_SECS must be set")
+                .parse::<u64>()
+                .unwrap(),
+            max_healthy_check_retrials: env::var("MAX_HEALTHY_CHECK_RETRIES")
+                .expect("MAX_HEALTHY_CHECK_RETRIES must be set")
+                .parse::<usize>()
+                .unwrap(),
+            max_start_timeout_secs: env::var("MAX_START_TIMEOUT_SECS")
+                .expect("MAX_START_TIMEOUT_SECS must be set")
+                .parse::<u64>()
+                .unwrap(),
+            max_starting_count: env::var("MAX_STARTING_COUNT")
+                .expect("MAX_STARTING_COUNT must be set")
+                .parse::<usize>()
+                .unwrap(),
+        }
+    }
 }
