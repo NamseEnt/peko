@@ -55,12 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Example 2: Free text search
     println!("\n=== Example 2: Free Text Search ===");
-    let free_text_search = SearchDetails::FreeText(
-        oci_rust_sdk::resource_search::FreeTextSearchDetails {
+    let free_text_search =
+        SearchDetails::FreeText(oci_rust_sdk::resource_search::FreeTextSearchDetails {
             text: "production".to_string(),
             matching_context_type: Some(MatchingContextType::None),
-        },
-    );
+        });
 
     let request = SearchResourcesRequest::builder(free_text_search)
         .limit(5)

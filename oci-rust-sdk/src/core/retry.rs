@@ -79,7 +79,7 @@ impl Default for Retrier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
+    use crate::core::*;
 
     #[test]
     fn test_retry_configuration_default() {

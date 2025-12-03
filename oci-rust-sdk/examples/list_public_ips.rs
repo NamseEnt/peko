@@ -106,8 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_pages = 3;
 
     loop {
-        let mut request_builder = ListPublicIpsRequest::builder(Scope::Region, &compartment_id)
-            .limit(2); // Small limit to demonstrate pagination
+        let mut request_builder =
+            ListPublicIpsRequest::builder(Scope::Region, &compartment_id).limit(2); // Small limit to demonstrate pagination
 
         if let Some(ref token) = page_token {
             request_builder = request_builder.page(token);
@@ -117,7 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match client.list_public_ips(request).await {
             Ok(response) => {
-                println!("\nPage {}: Found {} public IPs", page_number, response.items.len());
+                println!(
+                    "\nPage {}: Found {} public IPs",
+                    page_number,
+                    response.items.len()
+                );
                 for ip in &response.items {
                     println!("  - {}", ip.ip_address);
                 }
@@ -128,7 +132,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     page_number += 1;
 
                     if page_number > max_pages {
-                        println!("\nReached maximum pages ({}), stopping pagination demo", max_pages);
+                        println!(
+                            "\nReached maximum pages ({}), stopping pagination demo",
+                            max_pages
+                        );
                         break;
                     }
                 } else {

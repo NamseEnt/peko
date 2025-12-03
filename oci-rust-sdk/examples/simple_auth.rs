@@ -24,7 +24,9 @@ fn main() {
         .tenancy("ocid1.tenancy.oc1..aaaaaaaexample")
         .user("ocid1.user.oc1..aaaaaaaexample")
         .fingerprint("aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99")
-        .private_key("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----")
+        .private_key(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----",
+        )
         .passphrase("my-secret-passphrase")
         .region(Region::ApSeoul1)
         .auth_type("api_key")

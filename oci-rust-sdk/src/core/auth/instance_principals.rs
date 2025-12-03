@@ -4,9 +4,9 @@ use crate::core::auth::provider::AuthProvider;
 use crate::core::auth::x509_utils::extract_tenant_id;
 use crate::core::region::Region;
 use chrono::{DateTime, Duration, Utc};
-use parking_lot::RwLock;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Session state for instance principals authentication
 struct SessionState {
@@ -122,7 +122,7 @@ impl InstancePrincipalsAuthProvider {
     async fn ensure_token_valid(&self) -> crate::core::Result<()> {
         // Read lock - check expiration (with 5-minute buffer)
         {
-            let state = self.session_state.read();
+            let state = self.session_state.read().await;
             if !Self::is_expired(&state.expires_at) {
                 return Ok(());
             }
@@ -130,7 +130,7 @@ impl InstancePrincipalsAuthProvider {
 
         // Write lock - refresh token
         {
-            let mut state = self.session_state.write();
+            let mut state = self.session_state.write().await;
 
             // Double-check expiration (another thread may have refreshed)
             if !Self::is_expired(&state.expires_at) {
@@ -178,7 +178,7 @@ impl AuthProvider for InstancePrincipalsAuthProvider {
             });
 
         // Return "ST$<token>" format
-        let state = self.session_state.read();
+        let state = self.session_state.blocking_read();
         format!("ST${}", state.security_token)
     }
 
@@ -194,7 +194,11 @@ impl AuthProvider for InstancePrincipalsAuthProvider {
         // We use Box::leak() to satisfy the &str lifetime requirement
         // This creates a memory leak of ~2KB per refresh (once/hour)
         // which is acceptable for server applications
-        let pem = self.session_state.read().session_private_key_pem.clone();
+        let pem = self
+            .session_state
+            .blocking_read()
+            .session_private_key_pem
+            .clone();
         Box::leak(pem.into_boxed_str())
     }
 

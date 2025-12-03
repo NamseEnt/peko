@@ -104,7 +104,7 @@ impl Region {
 }
 
 impl std::str::FromStr for Region {
-    type Err = crate::OciError;
+    type Err = crate::core::OciError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             // Americas

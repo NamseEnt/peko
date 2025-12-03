@@ -35,7 +35,6 @@ dirs = "5"
 urlencoding = "2"
 x509-parser = "0.16"
 jsonwebtoken = "9"
-parking_lot = "0.12"
 rand = "0.8"
 
 [dev-dependencies]
