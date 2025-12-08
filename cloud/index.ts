@@ -39,30 +39,29 @@ const cloudflareApiToken = new cloudflare.AccountToken("cloudflareApiToken", {
   ],
   condition: {
     requestIp: {
-      ins: [awsWatchdogVpc.ipv6CiderBlock],
+      ins: [awsWatchdogVpc.ipv6CidrBlock],
     },
   },
 });
 
-// const ociComputeWorker = new fn0.OciComputeWorker("ociComputeWorker", {
-//   region: config.require("OCI_COMPUTE_WORKER_REGION"),
-//   watchdogIpv6CiderBlock: awsWatchdogVpc.ipv6CiderBlock,
-// });
+const ociComputeWorker = new fn0.OciComputeWorker("ociComputeWorker", {
+  region: config.require("OCI_COMPUTE_WORKER_REGION"),
+  watchdogIpv6CidrBlock: awsWatchdogVpc.ipv6CidrBlock,
+});
 
-// const awsWatchdog = new fn0.AwsWatchdog("awsWatchdog", {
-//   domain,
-//   region: awsWatchdogRegion,
-//   vpcId: awsWatchdogVpc.vpc.id,
-//   subnetId: awsWatchdogVpc.subnet.id,
-//   securityGroupId: awsWatchdogVpc.securityGroup.id,
-//   maxGracefulShutdownWaitSecs: 300,
-//   maxHealthyCheckRetries: 5,
-//   maxStartTimeoutSecs: 180,
-//   maxStartingCount: 1,
-//   ociWorkerInfraEnvs: ociComputeWorker.infraEnvs,
-//   cloudflareEnvs: {
-//     CLOUDFLARE_API_TOKEN: cloudflareApiToken.value,
-//     CLOUDFLARE_ASTERISK_DOMAIN: `*.${domain}`,
-//     CLOUDFLARE_ZONE_ID: zone.id,
-//   },
-// });
+const awsWatchdog = new fn0.AwsWatchdog("awsWatchdog", {
+  domain,
+  region: awsWatchdogRegion,
+  subnetId: awsWatchdogVpc.subnetId,
+  securityGroupId: awsWatchdogVpc.securityGroupId,
+  maxGracefulShutdownWaitSecs: 300,
+  maxHealthyCheckRetries: 5,
+  maxStartTimeoutSecs: 180,
+  maxStartingCount: 1,
+  ociWorkerInfraEnvs: ociComputeWorker.infraEnvs,
+  cloudflareEnvs: {
+    CLOUDFLARE_API_TOKEN: cloudflareApiToken.value,
+    CLOUDFLARE_ASTERISK_DOMAIN: `*.${domain}`,
+    CLOUDFLARE_ZONE_ID: zone.then((x) => x.id),
+  },
+});

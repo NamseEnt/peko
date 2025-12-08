@@ -16,4 +16,4 @@ config:
   fn0Cloud:OCI_COMPUTE_WORKER_REGION:
     type: string
 packages:
-  fn0: ../pulumi/@0.0.0
+  fn0: ../pulumi@0.0.0

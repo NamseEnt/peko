@@ -4,7 +4,6 @@ import { OciWorkerInfraEnvs } from "./OciComputeWorker";
 
 export interface AwsWatchdogArgs {
   region: pulumi.Input<string>;
-  vpcId: pulumi.Input<string>;
   subnetId: pulumi.Input<string>;
   securityGroupId: pulumi.Input<string>;
   maxGracefulShutdownWaitSecs: pulumi.Input<number>;
@@ -28,11 +27,10 @@ export class AwsWatchdog extends pulumi.ComponentResource {
     args: AwsWatchdogArgs,
     opts: pulumi.ComponentResourceOptions
   ) {
-    super("pkg:index:aws-watchdog-waker", name, args, opts);
+    super("pkg:index:aws-watchdog", name, args, opts);
 
     const {
       region,
-      vpcId,
       subnetId,
       securityGroupId,
       ociWorkerInfraEnvs,
@@ -44,24 +42,23 @@ export class AwsWatchdog extends pulumi.ComponentResource {
       cloudflareEnvs,
     } = args;
 
-    const eventRule = new aws.cloudwatch.EventRule("watchdog-waker", {
+    const eventRule = new aws.cloudwatch.EventRule("watchdog", {
       region,
-      name: `watchdog-waker-${name}`,
+      name: `watchdog-${name}`,
       scheduleExpression: "rate(1 minute)",
     });
 
     const lockDdb = setLockDdb(region);
     const healthRecordBucket = setHealthRecordBucket(region);
 
-    const lambdaFunction = new aws.lambda.CallbackFunction("watchdog-waker", {
+    const lambdaFunction = new aws.lambda.CallbackFunction("watchdog", {
       region,
       timeout: 10,
       vpcConfig: {
-        vpcId,
         subnetIds: [subnetId],
         securityGroupIds: [securityGroupId],
       },
-      role: new aws.iam.Role("watchdog-waker-role", {
+      role: new aws.iam.Role("watchdog-role", {
         assumeRolePolicy: {
           Version: "2012-10-17",
           Statement: [
@@ -76,21 +73,24 @@ export class AwsWatchdog extends pulumi.ComponentResource {
         },
         inlinePolicies: [
           {
-            policy: JSON.stringify({
-              Version: "2012-10-17",
-              Statement: [
-                {
-                  Effect: "Allow",
-                  Action: ["dynamodb:PutItem", "dynamodb:GetItem"],
-                  Resource: lockDdb.arn,
-                },
-                {
-                  Effect: "Allow",
-                  Action: ["s3:PutObject", "s3:GetObject"],
-                  Resource: healthRecordBucket.arn,
-                },
-              ],
-            } satisfies aws.iam.PolicyDocument),
+            name: "watchdog-policy",
+            policy: pulumi
+              .output({
+                Version: "2012-10-17",
+                Statement: [
+                  {
+                    Effect: "Allow",
+                    Action: ["dynamodb:PutItem", "dynamodb:GetItem"],
+                    Resource: lockDdb.arn,
+                  },
+                  {
+                    Effect: "Allow",
+                    Action: ["s3:PutObject", "s3:GetObject"],
+                    Resource: healthRecordBucket.arn,
+                  },
+                ],
+              } satisfies aws.iam.PolicyDocument)
+              .apply((policyDoc) => JSON.stringify(policyDoc)),
           },
         ],
         managedPolicyArns: [
@@ -123,7 +123,7 @@ export class AwsWatchdog extends pulumi.ComponentResource {
       callback: async () => {},
     });
 
-    new aws.cloudwatch.EventTarget("watchdog-waker-target", {
+    new aws.cloudwatch.EventTarget("watchdog-target", {
       region,
       rule: eventRule.name,
       arn: lambdaFunction.arn,

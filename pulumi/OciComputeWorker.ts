@@ -4,7 +4,7 @@ import * as tls from "@pulumi/tls";
 
 export interface OciComputeWorkerArgs {
   region: pulumi.Input<string>;
-  watchdogIpv6CiderBlock: pulumi.Input<string>;
+  watchdogIpv6CidrBlock: pulumi.Input<string>;
 }
 
 export interface OciWorkerInfraEnvs {
@@ -46,14 +46,11 @@ export class OciComputeWorker extends pulumi.ComponentResource {
       description: "fn0 watchdog user",
     });
 
-    const apiKey = new oci.identity.ApiKey("api-key", {
-      userId: oci_user.id,
-      keyValue: privateKey.publicKeyPem,
-    });
-
     const vcn = new oci.core.Vcn("vcn", {
       compartmentId: compartment.id,
       isIpv6enabled: true,
+      isOracleGuaAllocationEnabled: true,
+      cidrBlocks: ["10.0.0.0/16"],
     });
 
     const securityList = new oci.core.SecurityList("security-list", {
@@ -61,11 +58,12 @@ export class OciComputeWorker extends pulumi.ComponentResource {
       vcnId: vcn.id,
       ingressSecurityRules: [
         ...cloudflareIpv4Ranges,
-        ...clareflaseIpv6Ranges,
-        args.watchdogIpv6CiderBlock,
+        ...clareflareIpv6Ranges,
+        args.watchdogIpv6CidrBlock,
       ].map((source) => ({
-        protocol: "all",
+        protocol: "6",
         source,
+        tcpOptions: { min: 443, max: 443 },
       })),
       egressSecurityRules: [
         {
@@ -79,10 +77,39 @@ export class OciComputeWorker extends pulumi.ComponentResource {
       ],
     });
 
+    const internetGateway = new oci.core.InternetGateway("igw", {
+      compartmentId: compartment.id,
+      vcnId: vcn.id,
+    });
+
+    const routeTable = new oci.core.RouteTable("route-table", {
+      compartmentId: compartment.id,
+      vcnId: vcn.id,
+      routeRules: [
+        {
+          destination: "::/0",
+          destinationType: "CIDR_BLOCK",
+          networkEntityId: internetGateway.id,
+        },
+        {
+          destination: "0.0.0.0/0",
+          destinationType: "CIDR_BLOCK",
+          networkEntityId: internetGateway.id,
+        },
+      ],
+    });
+
     new oci.core.Subnet("subnet", {
       compartmentId: compartment.id,
       vcnId: vcn.id,
+      ipv4cidrBlocks: ["10.0.0.0/24"],
+      ipv6cidrBlocks: vcn.ipv6cidrBlocks.apply((x) =>
+        x.map((x) => x.replace("/56", "/64"))
+      ),
+      prohibitInternetIngress: false,
+      prohibitPublicIpOnVnic: false,
       securityListIds: [securityList.id],
+      routeTableId: routeTable.id,
     });
 
     const imageId = compartment.id.apply((compartmentId) =>
@@ -90,13 +117,13 @@ export class OciComputeWorker extends pulumi.ComponentResource {
         .getImages({
           compartmentId,
           operatingSystem: "Oracle Linux",
-          operatingSystemVersion: "10.0",
+          operatingSystemVersion: "10",
           sortOrder: "DESC",
         })
         .then((x) => {
-          const imageId = x.images.find((x) => {
-            x.createImageAllowed && x.displayName.includes("-aarch64-");
-          })?.id;
+          const imageId = x.images.find(
+            (x) => x.createImageAllowed && x.displayName.includes("-aarch64-")
+          )?.id;
 
           if (!imageId) {
             throw new Error("can not find image");
@@ -130,24 +157,16 @@ export class OciComputeWorker extends pulumi.ComponentResource {
     this.instanceConfigurationId = instanceConfiguration.id;
 
     this.infraEnvs = pulumi
-      .all([privateKey, oci_user, apiKey, compartment, instanceConfiguration])
-      .apply(
-        ([
-          privateKey,
-          oci_user,
-          apiKey,
-          compartment,
-          instanceConfiguration,
-        ]) => ({
-          OCI_PRIVATE_KEY_BASE64: privateKey.privateKeyPem,
-          OCI_USER_ID: oci_user.id,
-          OCI_FINGERPRINT: apiKey.fingerprint,
-          OCI_TENANCY_ID: oci_user.compartmentId,
-          OCI_REGION: pulumi.output(args.region),
-          OCI_COMPARTMENT_ID: compartment.id,
-          OCI_INSTANCE_CONFIGURATION_ID: instanceConfiguration.id,
-        })
-      );
+      .all([privateKey, oci_user, compartment, instanceConfiguration])
+      .apply(([privateKey, oci_user, compartment, instanceConfiguration]) => ({
+        OCI_PRIVATE_KEY_BASE64: privateKey.privateKeyPem,
+        OCI_USER_ID: oci_user.id,
+        OCI_FINGERPRINT: privateKey.publicKeyFingerprintMd5,
+        OCI_TENANCY_ID: oci_user.compartmentId,
+        OCI_REGION: pulumi.output(args.region),
+        OCI_COMPARTMENT_ID: compartment.id,
+        OCI_INSTANCE_CONFIGURATION_ID: instanceConfiguration.id,
+      }));
   }
 }
 
@@ -212,7 +231,7 @@ const cloudflareIpv4Ranges = [
   "131.0.72.0/22",
 ];
 
-const clareflaseIpv6Ranges = [
+const clareflareIpv6Ranges = [
   "2400:cb00::/32",
   "2606:4700::/32",
   "2803:f800::/32",

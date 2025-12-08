@@ -1,51 +1,56 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
-import { Subnet, SecurityGroup, Vpc } from "@pulumi/aws/ec2";
 
 export interface AwsWatchdogVpcArgs {
   region: pulumi.Input<string>;
 }
 
 export class AwsWatchdogVpc extends pulumi.ComponentResource {
-  public readonly vpc: Vpc;
-  public readonly subnet: Subnet;
-  public readonly securityGroup: SecurityGroup;
-  public readonly ipv6CiderBlock: pulumi.Output<string>;
+  public readonly vpcId: pulumi.Output<string>;
+  public readonly subnetId: pulumi.Output<string>;
+  public readonly securityGroupId: pulumi.Output<string>;
+  public readonly ipv6CidrBlock: pulumi.Output<string>;
 
   constructor(
     name: string,
     args: AwsWatchdogVpcArgs,
     opts: pulumi.ComponentResourceOptions
   ) {
-    super("pkg:index:aws-watchdog-waker-vpc", name, args, opts);
+    super("pkg:index:aws-watchdog-vpc", name, args, opts);
 
     const { region } = args;
 
     const vpc = new aws.ec2.Vpc("ipv6-vpc", {
       region,
+      cidrBlock: "10.0.0.0/16",
       assignGeneratedIpv6CidrBlock: true,
       enableDnsHostnames: true,
     });
-    this.vpc = vpc;
-    this.ipv6CiderBlock = vpc.ipv6CidrBlock;
+    this.vpcId = vpc.id;
+    this.ipv6CidrBlock = vpc.ipv6CidrBlock;
 
     const eigw = new aws.ec2.EgressOnlyInternetGateway("ipv6-eigw", {
       region,
       vpcId: vpc.id,
     });
 
-    const subnet = new aws.ec2.Subnet("ipv6-native-subnet", {
-      vpcId: vpc.id,
-      ipv6CidrBlock: vpc.ipv6CidrBlock.apply((cidr) => {
-        if (!cidr) return "";
-        const prefix = cidr.split("::/")[0];
-        return `${prefix}00::/64`;
-      }),
-      assignIpv6AddressOnCreation: true,
-      ipv6Native: true,
-      mapPublicIpOnLaunch: false,
-    });
-    this.subnet = subnet;
+    const subnet = new aws.ec2.Subnet(
+      "ipv6-native-subnet",
+      {
+        region,
+        vpcId: vpc.id,
+        ipv6CidrBlock: vpc.ipv6CidrBlock.apply((cidr) =>
+          cidr.replace("/56", "/64")
+        ),
+        cidrBlock: "10.0.0.0/24",
+        assignIpv6AddressOnCreation: true,
+        enableResourceNameDnsAaaaRecordOnLaunch: true,
+      },
+      {
+        deleteBeforeReplace: true,
+      }
+    );
+    this.subnetId = subnet.id;
 
     const routeTable = new aws.ec2.RouteTable("ipv6-rt", {
       region,
@@ -78,6 +83,6 @@ export class AwsWatchdogVpc extends pulumi.ComponentResource {
         },
       ],
     });
-    this.securityGroup = securityGroup;
+    this.securityGroupId = securityGroup.id;
   }
 }
