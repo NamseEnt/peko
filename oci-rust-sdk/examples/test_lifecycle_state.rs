@@ -1,4 +1,4 @@
-use oci_rust_sdk::compute::{LifecycleState, ListInstancesRequest};
+use oci_rust_sdk::compute::{LifecycleState, ListInstancesRequest, ListInstancesRequestRequiredFields};
 
 fn main() {
     println!("=== Testing LifecycleState Enum ===\n");
@@ -36,7 +36,9 @@ fn main() {
     ];
 
     for (state, expected) in &test_cases {
-        let request = ListInstancesRequest::builder("test-compartment-id")
+        let request = ListInstancesRequest::builder(ListInstancesRequestRequiredFields {
+            compartment_id: "test-compartment-id".to_string(),
+        })
             .lifecycle_state(*state)
             .build();
 
@@ -56,9 +58,10 @@ fn main() {
         println!("  ✓ {:?} -> lifecycleState={}", state, expected);
     }
 
-    // Test 3: Multiple filters combined
     println!("\nTest 3: Combined filters with LifecycleState");
-    let request = ListInstancesRequest::builder("compartment-123")
+    let request = ListInstancesRequest::builder(ListInstancesRequestRequiredFields {
+        compartment_id: "compartment-123".to_string(),
+    })
         .lifecycle_state(LifecycleState::Running)
         .display_name("my-instance")
         .limit(10)

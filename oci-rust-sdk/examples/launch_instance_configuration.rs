@@ -1,13 +1,16 @@
 use oci_rust_sdk::compute::{self, models::*, requests::*};
-use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region};
+use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize authentication from config file
     let auth = ConfigFileAuthProvider::from_default()?;
 
-    // Create compute client
-    let client = compute::client(auth, Region::ApSeoul1)?;
+    let client = compute::client(ClientConfig {
+        auth_provider: auth,
+        region: Region::ApSeoul1,
+        timeout: Duration::from_secs(30),
+    })?;
 
     // Set your instance configuration OCID
     let instance_configuration_id = "ocid1.instanceconfiguration.oc1..xxxxx".to_string();

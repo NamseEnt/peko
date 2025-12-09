@@ -20,15 +20,18 @@ use std::sync::Arc;
 /// Use the `client()` function to create a real client:
 ///
 /// ```no_run
-/// use std::sync::Arc;
-/// use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region};
+/// use std::time::Duration;
+/// use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig};
 /// use oci_rust_sdk::os_management_hub;
 ///
 /// # async fn example() -> oci_rust_sdk::core::Result<()> {
-/// let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
-/// let client = os_management_hub::client(auth, Region::ApSeoul1)?;
+/// let auth = ConfigFileAuthProvider::from_default()?;
+/// let client = os_management_hub::client(ClientConfig {
+///     auth_provider: auth,
+///     region: Region::ApSeoul1,
+///     timeout: Duration::from_secs(30),
+/// })?;
 ///
-/// // Use the client through the trait
 /// let request = os_management_hub::ListManagedInstancesRequest::builder().build();
 /// let response = client.list_managed_instances(request).await?;
 /// # Ok(())
@@ -74,6 +77,9 @@ use std::sync::Arc;
 /// Write functions that accept the trait instead of concrete types:
 ///
 /// ```
+/// use oci_rust_sdk::core::Result;
+/// use oci_rust_sdk::os_management_hub::{OsManagementHub, ListManagedInstancesRequest};
+///
 /// async fn count_instances<T: OsManagementHub>(
 ///     service: &T,
 ///     compartment_id: &str,
@@ -108,41 +114,15 @@ pub trait OsManagementHub: Send + Sync {
     // async fn delete_managed_instance(&self, request: DeleteManagedInstanceRequest) -> Result<DeleteManagedInstanceResponse>;
 }
 
-/// Create a new OS Management Hub client for the specified region.
-///
-/// Returns an `Arc<dyn OsManagementHub>` that can be used to interact with the
-/// OS Management Hub service. The client is configured with the provided
-/// authentication and region.
-///
-/// # Arguments
-///
-/// * `auth_provider` - Authentication provider for signing requests
-/// * `region` - OCI region where the service will be accessed
-///
-/// # Example
-///
-/// ```no_run
-/// use oci_rust_sdk::os_management_hub;
-/// use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region};
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
-/// let client = os_management_hub::client(auth, Region::ApSeoul1)?;
-///
-/// let request = os_management_hub::ListManagedInstancesRequest::builder()
-///     .compartment_id("ocid1.compartment.oc1..xxxxx")
-///     .build();
-/// let response = client.list_managed_instances(request).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub fn client(
-    auth_provider: impl crate::core::auth::AuthProvider + 'static,
-    region: crate::core::region::Region,
+pub fn client<A: crate::core::auth::AuthProvider + 'static>(
+    config: crate::core::ClientConfig<A>,
 ) -> Result<Arc<dyn OsManagementHub>> {
-    let endpoint = region.endpoint("osmh");
-    let oci_client = crate::core::OciClient::new(Arc::new(auth_provider), endpoint)?;
+    let endpoint = config.region.endpoint("osmh");
+    let oci_client = crate::core::OciClient::new(
+        Arc::new(config.auth_provider),
+        endpoint,
+        config.timeout,
+    )?;
     Ok(Arc::new(oci_client))
 }
 

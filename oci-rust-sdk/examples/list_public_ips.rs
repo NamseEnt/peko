@@ -1,23 +1,28 @@
 use oci_rust_sdk::{
-    core::{auth::ConfigFileAuthProvider, region::Region},
-    virtual_network::{self, Lifetime, ListPublicIpsRequest, Scope},
+    core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig},
+    virtual_network::{self, Lifetime, ListPublicIpsRequest, ListPublicIpsRequestRequiredFields, Scope},
 };
-use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Set up authentication from default OCI config file
-    let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
+    let auth = ConfigFileAuthProvider::from_default()?;
 
-    // Create a Virtual Network (Core Services) client
-    let client = virtual_network::client(auth, Region::ApSeoul1)?;
+    let client = virtual_network::client(ClientConfig {
+        auth_provider: auth,
+        region: Region::ApSeoul1,
+        timeout: Duration::from_secs(30),
+    })?;
 
     // IMPORTANT: Replace this with your actual compartment OCID
     let compartment_id = std::env::var("OCI_COMPARTMENT_ID")
         .unwrap_or_else(|_| "ocid1.compartment.oc1..aaaaaaaxxxxx".to_string());
 
     println!("=== Example 1: List Regional Public IPs ===");
-    let request = ListPublicIpsRequest::builder(Scope::Region, &compartment_id)
+    let request = ListPublicIpsRequest::builder(ListPublicIpsRequestRequiredFields {
+        scope: Scope::Region,
+        compartment_id: compartment_id.clone(),
+    })
         .limit(10)
         .build();
 
@@ -53,7 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== Example 2: List Reserved Public IPs Only ===");
-    let request = ListPublicIpsRequest::builder(Scope::Region, &compartment_id)
+    let request = ListPublicIpsRequest::builder(ListPublicIpsRequestRequiredFields {
+        scope: Scope::Region,
+        compartment_id: compartment_id.clone(),
+    })
         .lifetime(Lifetime::Reserved)
         .build();
 
@@ -79,7 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== Example 3: List Ephemeral Public IPs ===");
-    let request = ListPublicIpsRequest::builder(Scope::Region, &compartment_id)
+    let request = ListPublicIpsRequest::builder(ListPublicIpsRequestRequiredFields {
+        scope: Scope::Region,
+        compartment_id: compartment_id.clone(),
+    })
         .lifetime(Lifetime::Ephemeral)
         .limit(5)
         .build();
@@ -107,7 +118,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let mut request_builder =
-            ListPublicIpsRequest::builder(Scope::Region, &compartment_id).limit(2); // Small limit to demonstrate pagination
+            ListPublicIpsRequest::builder(ListPublicIpsRequestRequiredFields {
+                scope: Scope::Region,
+                compartment_id: compartment_id.clone(),
+            }).limit(2);
 
         if let Some(ref token) = page_token {
             request_builder = request_builder.page(token);

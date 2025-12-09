@@ -36,42 +36,12 @@ pub trait Compute: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ListInstancesResponse>> + Send + '_>>;
 }
 
-/// Create a new Compute client for the specified region.
-///
-/// Returns an `Arc<dyn Compute>` that can be used to interact with the
-/// Compute API. This service handles compute instances.
-///
-/// # Arguments
-///
-/// * `auth_provider` - Authentication provider for signing requests
-/// * `region` - OCI region where the service will be accessed
-///
-/// # Example
-///
-/// ```no_run
-/// use oci_rust_sdk::compute;
-/// use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region};
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
-/// let client = compute::client(auth, Region::ApSeoul1)?;
-///
-/// let request = compute::LaunchInstanceRequest::builder()
-///     .compartment_id("ocid1.compartment.oc1..xxxxx")
-///     .availability_domain("AD-1")
-///     .shape("VM.Standard2.1")
-///     .build();
-/// let response = client.launch_instance(request).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub fn client(
-    auth_provider: impl crate::core::auth::AuthProvider + 'static,
-    region: crate::core::region::Region,
+pub fn client<A: crate::core::auth::AuthProvider + 'static>(
+    config: crate::core::ClientConfig<A>,
 ) -> Result<Arc<dyn Compute>> {
-    let endpoint = region.endpoint("iaas");
-    let oci_client = crate::core::OciClient::new(Arc::new(auth_provider), endpoint)?;
+    let endpoint = config.region.endpoint("iaas");
+    let oci_client =
+        crate::core::OciClient::new(Arc::new(config.auth_provider), endpoint, config.timeout)?;
     Ok(Arc::new(oci_client))
 }
 
@@ -87,7 +57,10 @@ impl Compute for crate::core::OciClient {
 
             // Make POST request with LaunchInstanceDetails body
             let oci_response = self
-                .post::<LaunchInstanceDetails, Instance>(path, Some(&request.launch_instance_details))
+                .post::<LaunchInstanceDetails, Instance>(
+                    path,
+                    Some(&request.launch_instance_details),
+                )
                 .await?;
 
             // Extract request tracking headers
@@ -105,7 +78,8 @@ impl Compute for crate::core::OciClient {
     fn launch_instance_configuration(
         &self,
         request: LaunchInstanceConfigurationRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<LaunchInstanceConfigurationResponse>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<LaunchInstanceConfigurationResponse>> + Send + '_>>
+    {
         Box::pin(async move {
             // API version 20160918
             let path = format!(
@@ -160,7 +134,10 @@ impl Compute for crate::core::OciClient {
             };
 
             // API version 20160918
-            let path = format!("/20160918/instances/{}{}", request.instance_id, query_string);
+            let path = format!(
+                "/20160918/instances/{}{}",
+                request.instance_id, query_string
+            );
 
             // Make DELETE request
             let oci_response = self.delete::<()>(&path).await?;

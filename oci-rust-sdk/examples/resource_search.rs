@@ -1,18 +1,20 @@
 use oci_rust_sdk::{
-    core::{auth::ConfigFileAuthProvider, region::Region},
+    core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig},
     resource_search::{
-        self, MatchingContextType, SearchDetails, SearchResourcesRequest, StructuredSearchDetails,
+        self, MatchingContextType, SearchDetails, SearchResourcesRequest, SearchResourcesRequestRequiredFields, StructuredSearchDetails,
     },
 };
-use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Set up authentication using default config file
-    let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
+    let auth = ConfigFileAuthProvider::from_default()?;
 
-    // Create a Resource Search client for the region
-    let client = resource_search::client(auth, Region::ApSeoul1)?;
+    let client = resource_search::client(ClientConfig {
+        auth_provider: auth,
+        region: Region::ApSeoul1,
+        timeout: Duration::from_secs(30),
+    })?;
 
     // Example 1: Structured search query
     println!("=== Example 1: Structured Search ===");
@@ -21,7 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matching_context_type: Some(MatchingContextType::Highlights),
     });
 
-    let request = SearchResourcesRequest::builder(search_details)
+    let request = SearchResourcesRequest::builder(SearchResourcesRequestRequiredFields {
+        search_details,
+    })
         .limit(10)
         .build();
 
@@ -53,7 +57,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Example 2: Free text search
     println!("\n=== Example 2: Free Text Search ===");
     let free_text_search =
         SearchDetails::FreeText(oci_rust_sdk::resource_search::FreeTextSearchDetails {
@@ -61,7 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             matching_context_type: Some(MatchingContextType::None),
         });
 
-    let request = SearchResourcesRequest::builder(free_text_search)
+    let request = SearchResourcesRequest::builder(SearchResourcesRequestRequiredFields {
+        search_details: free_text_search,
+    })
         .limit(5)
         .build();
 

@@ -5,6 +5,7 @@ use crate::core::retry::Retrier;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// OCI API client for making requests to Oracle Cloud Infrastructure services
 pub struct OciClient {
@@ -15,17 +16,14 @@ pub struct OciClient {
 }
 
 impl OciClient {
-    /// Create a new OCI client
-    ///
-    /// # Arguments
-    /// * `auth_provider` - Authentication provider
-    /// * `endpoint` - Base endpoint URL (e.g., "https://osmh.ap-seoul-1.oci.oraclecloud.com")
     pub fn new(
         auth_provider: Arc<dyn AuthProvider>,
         endpoint: String,
+        timeout: Duration,
     ) -> crate::core::Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(format!("oci-rust-sdk/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(timeout)
             .build()
             .map_err(OciError::HttpError)?;
 

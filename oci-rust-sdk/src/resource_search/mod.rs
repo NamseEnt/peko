@@ -17,25 +17,31 @@ pub use requests::*;
 /// # Example
 ///
 /// ```no_run
+/// use std::time::Duration;
 /// use oci_rust_sdk::{
-///     core::{auth::ConfigFileAuthProvider, region::Region},
+///     core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig},
 ///     resource_search::{
-///         self, SearchResourcesRequest, SearchDetails,
+///         self, SearchResourcesRequest, SearchResourcesRequestRequiredFields, SearchDetails,
 ///         StructuredSearchDetails, MatchingContextType,
 ///     },
 /// };
-/// use std::sync::Arc;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
-/// let client = resource_search::client(auth, Region::ApSeoul1)?;
+/// let auth = ConfigFileAuthProvider::from_default()?;
+/// let client = resource_search::client(ClientConfig {
+///     auth_provider: auth,
+///     region: Region::ApSeoul1,
+///     timeout: Duration::from_secs(30),
+/// })?;
 ///
 /// let search_details = SearchDetails::Structured(StructuredSearchDetails {
 ///     query: "query instance resources".to_string(),
 ///     matching_context_type: Some(MatchingContextType::Highlights),
 /// });
 ///
-/// let request = SearchResourcesRequest::builder(search_details)
+/// let request = SearchResourcesRequest::builder(SearchResourcesRequestRequiredFields {
+///     search_details,
+/// })
 ///     .limit(100)
 ///     .build();
 ///
@@ -64,45 +70,15 @@ pub trait ResourceSearch: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<SearchResourcesResponse>> + Send + '_>>;
 }
 
-/// Create a new Resource Search client for the specified region.
-///
-/// Returns an `Arc<dyn ResourceSearch>` that can be used to search for resources
-/// across your OCI tenancy. The Resource Search service uses a special endpoint
-/// pattern (`query.{region}.oci.oraclecloud.com`).
-///
-/// # Arguments
-///
-/// * `auth_provider` - Authentication provider for signing requests
-/// * `region` - OCI region where the service will be accessed
-///
-/// # Example
-///
-/// ```no_run
-/// use oci_rust_sdk::resource_search;
-/// use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region};
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
-/// let client = resource_search::client(auth, Region::ApSeoul1)?;
-///
-/// let search_details = resource_search::SearchDetails::Structured(
-///     resource_search::StructuredSearchDetails {
-///         query: "query instance resources".to_string(),
-///         matching_context_type: Some(resource_search::MatchingContextType::Highlights),
-///     }
-/// );
-/// let request = resource_search::SearchResourcesRequest::builder(search_details).build();
-/// let response = client.search_resources(request).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub fn client(
-    auth_provider: impl crate::core::auth::AuthProvider + 'static,
-    region: crate::core::region::Region,
+pub fn client<A: crate::core::auth::AuthProvider + 'static>(
+    config: crate::core::ClientConfig<A>,
 ) -> Result<Arc<dyn ResourceSearch>> {
-    let endpoint = region.query_endpoint();
-    let oci_client = crate::core::OciClient::new(Arc::new(auth_provider), endpoint)?;
+    let endpoint = config.region.query_endpoint();
+    let oci_client = crate::core::OciClient::new(
+        Arc::new(config.auth_provider),
+        endpoint,
+        config.timeout,
+    )?;
     Ok(Arc::new(oci_client))
 }
 

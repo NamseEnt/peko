@@ -18,41 +18,15 @@ pub trait VirtualNetwork: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ListPublicIpsResponse>> + Send + '_>>;
 }
 
-/// Create a new Virtual Network (Core) client for the specified region.
-///
-/// Returns an `Arc<dyn VirtualNetwork>` that can be used to interact with the
-/// Virtual Network (Core Services) API. This service handles networking resources
-/// like VCNs, subnets, and public IPs.
-///
-/// # Arguments
-///
-/// * `auth_provider` - Authentication provider for signing requests
-/// * `region` - OCI region where the service will be accessed
-///
-/// # Example
-///
-/// ```no_run
-/// use oci_rust_sdk::virtual_network;
-/// use oci_rust_sdk::core::{auth::ConfigFileAuthProvider, region::Region};
-/// use std::sync::Arc;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let auth = Arc::new(ConfigFileAuthProvider::from_default()?);
-/// let client = virtual_network::client(auth, Region::ApSeoul1)?;
-///
-/// let request = virtual_network::ListPublicIpsRequest::builder()
-///     .compartment_id("ocid1.compartment.oc1..xxxxx")
-///     .build();
-/// let response = client.list_public_ips(request).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub fn client(
-    auth_provider: impl crate::core::auth::AuthProvider + 'static,
-    region: crate::core::region::Region,
+pub fn client<A: crate::core::auth::AuthProvider + 'static>(
+    config: crate::core::ClientConfig<A>,
 ) -> Result<Arc<dyn VirtualNetwork>> {
-    let endpoint = region.endpoint("iaas");
-    let oci_client = crate::core::OciClient::new(Arc::new(auth_provider), endpoint)?;
+    let endpoint = config.region.endpoint("iaas");
+    let oci_client = crate::core::OciClient::new(
+        Arc::new(config.auth_provider),
+        endpoint,
+        config.timeout,
+    )?;
     Ok(Arc::new(oci_client))
 }
 
