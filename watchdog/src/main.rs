@@ -114,7 +114,7 @@ fn main() {
 
             let dns_at = env::var("DNS_AT").expect("env var DNS_AT is not set");
             let dns: Arc<dyn Dns> = match dns_at.as_str() {
-                "cloudflare" => Arc::new(dns::cloudflare::CloudflareDns::new().await),
+                "cloudflare" => Arc::new(dns::cloudflare::CloudflareDns::new(None).await),
                 _ => panic!("unknown dns type {dns_at}"),
             };
             run_watchdog(&context, lock, health_recorder, worker_infra, dns)

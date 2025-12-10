@@ -147,48 +147,171 @@ mod tests {
     };
     use chrono::{TimeDelta, Utc};
 
-    // Helper function to create a test Context
-    fn create_test_context(
+    // ========================================
+    // Test Fixture
+    // ========================================
+
+    struct TestFixture {
+        context: Context,
+        health_records: HealthRecords,
+        response_map: WorkerHealthResponseMap,
         start_time: DateTime<Utc>,
-        max_graceful_shutdown_wait_time: TimeDelta,
-        max_healthy_check_retrials: usize,
-    ) -> Context {
-        Context {
-            start_time,
-            domain: "test.example.com".to_string(),
-            max_graceful_shutdown_wait_time,
-            max_healthy_check_retrials,
-            max_start_timeout: TimeDelta::minutes(10),
-            max_starting_count: 5,
+    }
+
+    impl TestFixture {
+        fn new() -> Self {
+            let start_time = Utc::now();
+            let context = Context {
+                start_time,
+                domain: "test.example.com".to_string(),
+                max_graceful_shutdown_wait_time: TimeDelta::minutes(5),
+                max_healthy_check_retrials: 3,
+                max_start_timeout: TimeDelta::minutes(10),
+                max_starting_count: 5,
+            };
+            Self {
+                context,
+                health_records: HealthRecords::new(),
+                response_map: WorkerHealthResponseMap::new(),
+                start_time,
+            }
+        }
+
+        fn start_time(&self) -> DateTime<Utc> {
+            self.start_time
+        }
+
+        fn previous_time(&self, minutes_ago: i64) -> DateTime<Utc> {
+            self.start_time - TimeDelta::minutes(minutes_ago)
+        }
+
+        // Builder methods
+        fn with_record(mut self, id: &str, state: HealthState, time_offset: TimeDelta) -> Self {
+            self.health_records.insert(
+                WorkerId(id.to_string()),
+                HealthRecord {
+                    state,
+                    state_transited_at: self.start_time + time_offset,
+                },
+            );
+            self
+        }
+
+        fn with_response(
+            mut self,
+            id: &str,
+            state: WorkerInstanceState,
+            health_response: Option<WorkerHealthKind>,
+        ) -> Self {
+            let worker_info = WorkerInfo {
+                id: WorkerId(id.to_string()),
+                ip: None,
+                instance_state: state,
+                instance_created: Utc::now(), // irrelevant for these tests
+            };
+
+            let response = health_response.map(|kind| WorkerHealthResponse {
+                kind,
+                ip: "127.0.0.1".parse().unwrap(),
+            });
+
+            self.response_map
+                .insert(WorkerId(id.to_string()), (worker_info, response));
+            self
+        }
+
+        fn run(mut self) -> Self {
+            update_health_records(
+                &self.context,
+                &mut self.health_records,
+                self.response_map.clone(),
+            )
+            .unwrap();
+            self
+        }
+
+        // Assertions
+        fn get_record(&self, id: &str) -> &HealthRecord {
+            self.health_records
+                .get(&WorkerId(id.to_string()))
+                .expect("Record expected but not found")
+        }
+
+        fn assert_state_matches<P>(self, id: &str, predicate: P) -> Self
+        where
+            P: FnOnce(&HealthState) -> bool,
+        {
+            let record = self.get_record(id);
+            assert!(
+                predicate(&record.state),
+                "State predicate failed for {}",
+                id
+            );
+            self
+        }
+
+        fn assert_transited_at(self, id: &str, expected_time: DateTime<Utc>) -> Self {
+            let record = self.get_record(id);
+            assert_eq!(
+                record.state_transited_at, expected_time,
+                "TransitedAt time mismatch for {}",
+                id
+            );
+            self
+        }
+
+        fn assert_no_record(self, id: &str) -> Self {
+            assert!(
+                !self.health_records.contains_key(&WorkerId(id.to_string())),
+                "Record should NOT exist for {}",
+                id
+            );
+            self
         }
     }
 
-    // Helper function to create a WorkerId
-    fn worker_id(id: &str) -> WorkerId {
-        WorkerId(id.to_string())
+    // ========================================
+    // Helper Macro for State Transitions
+    // ========================================
+
+    macro_rules! test_transition {
+        ($name:ident, $start_state:expr, $worker_state:expr, $health_resp:expr, $matcher:pat) => {
+            #[test]
+            fn $name() {
+                let fixture = TestFixture::new();
+                let start_time = fixture.start_time();
+
+                fixture
+                    .with_record("worker1", $start_state, TimeDelta::minutes(-1))
+                    .with_response("worker1", $worker_state, $health_resp)
+                    .run()
+                    .assert_state_matches("worker1", |s| matches!(s, $matcher))
+                    .assert_transited_at("worker1", start_time);
+            }
+        };
     }
 
-    // Helper function to create a test IP address
+    // For cases where time should be preserved
+    macro_rules! test_state_preserved {
+        ($name:ident, $start_state:expr, $worker_state:expr, $health_resp:expr, $matcher:pat) => {
+            #[test]
+            fn $name() {
+                let fixture = TestFixture::new();
+                let previous_time = fixture.previous_time(1);
+
+                fixture
+                    .with_record("worker1", $start_state, TimeDelta::minutes(-1))
+                    .with_response("worker1", $worker_state, $health_resp)
+                    .run()
+                    .assert_state_matches("worker1", |s| matches!(s, $matcher))
+                    .assert_transited_at("worker1", previous_time);
+            }
+        };
+    }
+
+    // Helper for ip
     fn test_ip() -> std::net::IpAddr {
         "127.0.0.1".parse().unwrap()
-    }
-
-    // Helper function to create a WorkerInfo
-    fn create_worker_info(id: &str, state: WorkerInstanceState) -> WorkerInfo {
-        WorkerInfo {
-            id: worker_id(id),
-            ip: None,
-            instance_state: state,
-            instance_created: Utc::now(),
-        }
-    }
-
-    // Helper function to create a HealthRecord
-    fn create_health_record(state: HealthState, transited_at: DateTime<Utc>) -> HealthRecord {
-        HealthRecord {
-            state,
-            state_transited_at: transited_at,
-        }
     }
 
     // ========================================
@@ -197,464 +320,204 @@ mod tests {
 
     #[test]
     fn test_new_worker_with_good_response() {
-        // Case 1.1: New healthy worker discovered
-        let start_time = Utc::now();
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-        let mut health_records = HealthRecords::new();
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::Good,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        assert_eq!(health_records.len(), 1);
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Healthy { .. }));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_response(
+                "worker1",
+                WorkerInstanceState::Running,
+                Some(WorkerHealthKind::Good),
+            )
+            .run()
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::Healthy { .. }))
+            .assert_transited_at("worker1", start_time);
     }
 
     #[test]
     fn test_new_worker_with_graceful_shutdown() {
-        // Case 1.2: New worker in graceful shutdown discovered
-        let start_time = Utc::now();
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-        let mut health_records = HealthRecords::new();
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::GracefulShuttingDown,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        assert_eq!(health_records.len(), 1);
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::GracefulShuttingDown));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_response(
+                "worker1",
+                WorkerInstanceState::Running,
+                Some(WorkerHealthKind::GracefulShuttingDown),
+            )
+            .run()
+            .assert_state_matches("worker1", |s| {
+                matches!(s, HealthState::GracefulShuttingDown)
+            })
+            .assert_transited_at("worker1", start_time);
     }
 
     #[test]
     fn test_new_worker_with_no_response() {
-        // Case 1.3: New worker with no response discovered
-        let start_time = Utc::now();
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-        let mut health_records = HealthRecords::new();
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        assert_eq!(health_records.len(), 1);
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(
-            record.state,
-            HealthState::RetryingCheck { retrials: 1 }
-        ));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_response("worker1", WorkerInstanceState::Running, None)
+            .run()
+            .assert_state_matches("worker1", |s| {
+                matches!(s, HealthState::RetryingCheck { retrials: 1 })
+            })
+            .assert_transited_at("worker1", start_time);
     }
 
     // ========================================
     // 2. Existing Worker State Updates (Happy Path)
     // ========================================
 
-    #[test]
-    fn test_healthy_worker_stays_healthy() {
-        // Case 2.1: Healthy status maintained
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    test_transition!(
+        test_healthy_worker_stays_healthy,
+        HealthState::Healthy { ip: test_ip() },
+        WorkerInstanceState::Running,
+        Some(WorkerHealthKind::Good),
+        HealthState::Healthy { .. }
+    );
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Healthy { ip: test_ip() }, previous_time),
-        );
+    test_transition!(
+        test_retrying_worker_recovers,
+        HealthState::RetryingCheck { retrials: 2 },
+        WorkerInstanceState::Running,
+        Some(WorkerHealthKind::Good),
+        HealthState::Healthy { .. }
+    );
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::Good,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Healthy { .. }));
-        assert_eq!(record.state_transited_at, start_time); // Time is updated
-    }
-
-    #[test]
-    fn test_retrying_worker_recovers() {
-        // Case 2.2: Recovery (Retrying -> Healthy)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::RetryingCheck { retrials: 2 }, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::Good,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Healthy { .. }));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_healthy_worker_receives_graceful_shutdown() {
-        // Case 2.3: Shutdown signal received (Healthy -> Graceful)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Healthy { ip: test_ip() }, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::GracefulShuttingDown,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::GracefulShuttingDown));
-        assert_eq!(record.state_transited_at, start_time);
-    }
+    test_transition!(
+        test_healthy_worker_receives_graceful_shutdown,
+        HealthState::Healthy { ip: test_ip() },
+        WorkerInstanceState::Running,
+        Some(WorkerHealthKind::GracefulShuttingDown),
+        HealthState::GracefulShuttingDown
+    );
 
     // ========================================
     // 3. Health Check Failures and Retry Logic
     // ========================================
 
-    #[test]
-    fn test_healthy_worker_first_failure() {
-        // Case 3.1: First failure
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    test_transition!(
+        test_healthy_worker_first_failure,
+        HealthState::Healthy { ip: test_ip() },
+        WorkerInstanceState::Running,
+        None,
+        HealthState::RetryingCheck { retrials: 1 }
+    );
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Healthy { ip: test_ip() }, previous_time),
-        );
+    test_state_preserved!(
+        test_retrying_worker_increases_retrials,
+        HealthState::RetryingCheck { retrials: 2 },
+        WorkerInstanceState::Running,
+        None,
+        HealthState::RetryingCheck { retrials: 3 }
+    );
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
+    test_transition!(
+        test_max_retrials_exceeded,
+        HealthState::RetryingCheck { retrials: 3 },
+        WorkerInstanceState::Running,
+        None,
+        HealthState::MarkedForTermination
+    );
 
-        update_health_records(&context, &mut health_records, response_map).unwrap();
+    test_state_preserved!(
+        test_marked_for_termination_stays_unchanged_on_no_response,
+        HealthState::MarkedForTermination,
+        WorkerInstanceState::Running,
+        None,
+        HealthState::MarkedForTermination
+    );
 
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(
-            record.state,
-            HealthState::RetryingCheck { retrials: 1 }
-        ));
-        assert_eq!(record.state_transited_at, start_time);
-    }
+    test_state_preserved!(
+        test_graceful_shutting_down_stays_unchanged_on_no_response,
+        HealthState::GracefulShuttingDown,
+        WorkerInstanceState::Running,
+        None,
+        HealthState::GracefulShuttingDown
+    );
 
-    #[test]
-    fn test_retrying_worker_increases_retrials() {
-        // Case 3.2: Retry count increases
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::RetryingCheck { retrials: 2 }, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(
-            record.state,
-            HealthState::RetryingCheck { retrials: 3 }
-        ));
-        // Since state hasn't changed, transited_at keeps the previous time
-        assert_eq!(record.state_transited_at, previous_time);
-    }
-
-    #[test]
-    fn test_max_retrials_exceeded() {
-        // Case 3.3: Max retry count exceeded
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::RetryingCheck { retrials: 3 }, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::MarkedForTermination));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_marked_for_termination_stays_unchanged_on_no_response() {
-        // Case 3.4: Already scheduled for termination (MarkedForTermination)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::MarkedForTermination, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::MarkedForTermination));
-        assert_eq!(record.state_transited_at, previous_time); // No change
-    }
-
-    #[test]
-    fn test_graceful_shutting_down_stays_unchanged_on_no_response() {
-        // Case 3.4: Already scheduled for termination (GracefulShuttingDown)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::GracefulShuttingDown, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::GracefulShuttingDown));
-        assert_eq!(record.state_transited_at, previous_time); // No change
-    }
-
-    #[test]
-    fn test_terminated_confirm_stays_unchanged_on_no_response() {
-        // Case 3.4: Already scheduled for termination (TerminatedConfirm)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::TerminatedConfirm, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, previous_time); // No change
-    }
+    test_state_preserved!(
+        test_terminated_confirm_stays_unchanged_on_no_response,
+        HealthState::TerminatedConfirm,
+        WorkerInstanceState::Running,
+        None,
+        HealthState::TerminatedConfirm
+    );
 
     // ========================================
     // 4. Infrastructure Sync (Disappeared Workers)
     // ========================================
 
     #[test]
-    fn test_healthy_worker_disappears_from_infra() {
-        // Case 4.1: Disappearance detected - Healthy state
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    fn test_workers_disappear_from_infra() {
+        // Covering Case 4.1 for various states
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Healthy { ip: test_ip() }, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::InvisibleOnInfra));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_retrying_worker_disappears_from_infra() {
-        // Case 4.1: Disappearance detected - RetryingCheck state
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::RetryingCheck { retrials: 2 }, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::InvisibleOnInfra));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_graceful_shutting_down_worker_disappears_from_infra() {
-        // Case 4.1: Disappearance detected - GracefulShuttingDown state
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::GracefulShuttingDown, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::InvisibleOnInfra));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_record(
+                "healthy",
+                HealthState::Healthy { ip: test_ip() },
+                TimeDelta::minutes(-1),
+            )
+            .with_record(
+                "retrying",
+                HealthState::RetryingCheck { retrials: 2 },
+                TimeDelta::minutes(-1),
+            )
+            .with_record(
+                "graceful",
+                HealthState::GracefulShuttingDown,
+                TimeDelta::minutes(-1),
+            )
+            .run()
+            .assert_state_matches("healthy", |s| matches!(s, HealthState::InvisibleOnInfra))
+            .assert_transited_at("healthy", start_time)
+            .assert_state_matches("retrying", |s| matches!(s, HealthState::InvisibleOnInfra))
+            .assert_transited_at("retrying", start_time)
+            .assert_state_matches("graceful", |s| matches!(s, HealthState::InvisibleOnInfra))
+            .assert_transited_at("graceful", start_time);
     }
 
     #[test]
     fn test_invisible_worker_returns() {
-        // Case 4.2: Return of disappeared worker
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::InvisibleOnInfra, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::Good,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Healthy { .. }));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_record(
+                "worker1",
+                HealthState::InvisibleOnInfra,
+                TimeDelta::minutes(-1),
+            )
+            .with_response(
+                "worker1",
+                WorkerInstanceState::Running,
+                Some(WorkerHealthKind::Good),
+            )
+            .run()
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::Healthy { .. }))
+            .assert_transited_at("worker1", start_time);
     }
 
     #[test]
-    fn test_invisible_worker_stays_retained() {
-        // Case 4.3: Invisible state maintained (less than 5 minutes elapsed)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(2); // 2 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    fn test_invisible_worker_stays_retained_and_time_preserved() {
+        // Case 4.3: Invisible state maintained & time preserved
+        let fixture = TestFixture::new();
+        let previous_time = fixture.previous_time(2); // 2 minutes ago
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::InvisibleOnInfra, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should still exist
-        assert!(health_records.contains_key(&worker_id("worker1")));
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::InvisibleOnInfra));
+        fixture
+            .with_record(
+                "worker1",
+                HealthState::InvisibleOnInfra,
+                TimeDelta::minutes(-2),
+            )
+            // No response in map => invisible logic kicks in
+            .run()
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::InvisibleOnInfra))
+            .assert_transited_at("worker1", previous_time); // CRITICAL: Time must NOT be updated
     }
 
     // ========================================
@@ -662,222 +525,126 @@ mod tests {
     // ========================================
 
     #[test]
-    fn test_old_marked_for_termination_is_deleted() {
-        // Case 5.1: Delete cleanup target - MarkedForTermination
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(6); // 6 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    fn test_cleanup_policy() {
+        let fixture = TestFixture::new();
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::MarkedForTermination, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should be deleted
-        assert!(!health_records.contains_key(&worker_id("worker1")));
-    }
-
-    #[test]
-    fn test_old_terminated_confirm_is_deleted() {
-        // Case 5.1: Delete cleanup target - TerminatedConfirm
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(6); // 6 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::TerminatedConfirm, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should be deleted
-        assert!(!health_records.contains_key(&worker_id("worker1")));
-    }
-
-    #[test]
-    fn test_old_invisible_on_infra_is_deleted() {
-        // Case 5.1: Delete cleanup target - InvisibleOnInfra
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(6); // 6 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::InvisibleOnInfra, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should be deleted
-        assert!(!health_records.contains_key(&worker_id("worker1")));
-    }
-
-    #[test]
-    fn test_recent_marked_for_termination_is_retained() {
-        // Case 5.2: Not a cleanup target (insufficient time) - MarkedForTermination
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(3); // 3 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::MarkedForTermination, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should be preserved
-        assert!(health_records.contains_key(&worker_id("worker1")));
-    }
-
-    #[test]
-    fn test_recent_terminated_confirm_is_retained() {
-        // Case 5.2: Not a cleanup target (insufficient time) - TerminatedConfirm
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(3); // 3 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::TerminatedConfirm, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should be preserved
-        assert!(health_records.contains_key(&worker_id("worker1")));
-    }
-
-    #[test]
-    fn test_recent_invisible_on_infra_is_retained() {
-        // Case 5.2: Not a cleanup target (insufficient time) - InvisibleOnInfra
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(3); // 3 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::InvisibleOnInfra, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record should be preserved
-        assert!(health_records.contains_key(&worker_id("worker1")));
+        fixture
+            // Should be deleted (6 mins ago)
+            .with_record(
+                "old_term",
+                HealthState::MarkedForTermination,
+                TimeDelta::minutes(-6),
+            )
+            .with_record(
+                "old_confirm",
+                HealthState::TerminatedConfirm,
+                TimeDelta::minutes(-6),
+            )
+            .with_record(
+                "old_invisible",
+                HealthState::InvisibleOnInfra,
+                TimeDelta::minutes(-6),
+            )
+            // Should be retained (3 mins ago)
+            .with_record(
+                "recent_term",
+                HealthState::MarkedForTermination,
+                TimeDelta::minutes(-3),
+            )
+            .with_record(
+                "recent_confirm",
+                HealthState::TerminatedConfirm,
+                TimeDelta::minutes(-3),
+            )
+            .with_record(
+                "recent_invisible",
+                HealthState::InvisibleOnInfra,
+                TimeDelta::minutes(-3),
+            )
+            .run()
+            // Check deletions
+            .assert_no_record("old_term")
+            .assert_no_record("old_confirm")
+            .assert_no_record("old_invisible")
+            // Check retentions
+            .assert_state_matches("recent_term", |s| {
+                matches!(s, HealthState::MarkedForTermination)
+            })
+            .assert_state_matches("recent_confirm", |s| {
+                matches!(s, HealthState::TerminatedConfirm)
+            })
+            .assert_state_matches("recent_invisible", |s| {
+                matches!(s, HealthState::InvisibleOnInfra)
+            });
     }
 
     #[test]
     fn test_healthy_worker_not_deleted_when_missing_from_infra() {
-        // Case 5.3: Healthy worker transitions to InvisibleOnInfra (not deleted)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Healthy { ip: test_ip() }, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        // Record is preserved and changed to InvisibleOnInfra
-        assert!(health_records.contains_key(&worker_id("worker1")));
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::InvisibleOnInfra));
+        fixture
+            .with_record(
+                "worker1",
+                HealthState::Healthy { ip: test_ip() },
+                TimeDelta::minutes(-1),
+            )
+            .run() // No response
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::InvisibleOnInfra))
+            .assert_transited_at("worker1", start_time);
     }
 
     // ========================================
     // 6. Graceful Shutdown Timeout
     // ========================================
 
-    #[test]
-    fn test_graceful_shutdown_timeout_exceeded() {
-        // Case 6.1: Timeout exceeded
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(6); // 6 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::GracefulShuttingDown, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::GracefulShuttingDown,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::MarkedForTermination));
-        assert_eq!(record.state_transited_at, start_time);
-    }
+    // Actually, `test_transition!` sets time to -1 minute.
+    // Logic: `record.state_transited_at + max < start_time`
+    // If state_transited_at = start - 6 mins.
+    // -6 + 5 = -1 < 0. True.
+    // If state_transited_at = start - 1 mins.
+    // -1 + 5 = 4 > 0. False.
+    // So `test_transition!` will NOT trigger timeout.
+    // I should NOT use `test_transition!` for timeout case.
+    // I will remove `test_graceful_shutdown_timeout_exceeded` macro call and use manual test.
 
     #[test]
-    fn test_graceful_shutdown_within_timeout() {
-        // Case 6.2: Within timeout
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(3); // 3 minutes ago
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    fn test_graceful_shutdown_timeout_logic() {
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
+        let _previous_time_old = fixture.previous_time(6); // 6 mins ago (expired)
+        let previous_time_recent = fixture.previous_time(3); // 3 mins ago (valid)
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::GracefulShuttingDown, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::GracefulShuttingDown,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::GracefulShuttingDown));
-        assert_eq!(record.state_transited_at, previous_time); // No change
+        fixture
+            .with_record(
+                "timeout_worker",
+                HealthState::GracefulShuttingDown,
+                TimeDelta::minutes(-6),
+            )
+            .with_response(
+                "timeout_worker",
+                WorkerInstanceState::Running,
+                Some(WorkerHealthKind::GracefulShuttingDown),
+            )
+            .with_record(
+                "ok_worker",
+                HealthState::GracefulShuttingDown,
+                TimeDelta::minutes(-3),
+            )
+            .with_response(
+                "ok_worker",
+                WorkerInstanceState::Running,
+                Some(WorkerHealthKind::GracefulShuttingDown),
+            )
+            .run()
+            .assert_state_matches("timeout_worker", |s| {
+                matches!(s, HealthState::MarkedForTermination)
+            })
+            .assert_transited_at("timeout_worker", start_time)
+            .assert_state_matches("ok_worker", |s| {
+                matches!(s, HealthState::GracefulShuttingDown)
+            })
+            .assert_transited_at("ok_worker", previous_time_recent); // Time preserved
     }
 
     // ========================================
@@ -886,157 +653,64 @@ mod tests {
 
     #[test]
     fn test_new_worker_in_starting_state() {
-        // Case 7.1: New worker detected - Starting state
-        let start_time = Utc::now();
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-        let mut health_records = HealthRecords::new();
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Starting);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        assert_eq!(health_records.len(), 1);
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Starting));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_response("worker1", WorkerInstanceState::Starting, None)
+            .run()
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::Starting))
+            .assert_transited_at("worker1", start_time);
     }
 
-    #[test]
-    fn test_starting_to_healthy_transition() {
-        // Case 7.2: Starting → Healthy transition
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    test_transition!(
+        test_starting_to_healthy_transition,
+        HealthState::Starting,
+        WorkerInstanceState::Running,
+        Some(WorkerHealthKind::Good),
+        HealthState::Healthy { .. }
+    );
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Starting, previous_time),
-        );
+    test_transition!(
+        test_starting_to_graceful_shutdown_transition,
+        HealthState::Starting,
+        WorkerInstanceState::Running,
+        Some(WorkerHealthKind::GracefulShuttingDown),
+        HealthState::GracefulShuttingDown
+    );
 
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::Good,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Healthy { .. }));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_starting_to_graceful_shutdown_transition() {
-        // Case 7.3: Starting → GracefulShuttingDown transition
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Starting, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::GracefulShuttingDown,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::GracefulShuttingDown));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_starting_state_maintained_within_timeout() {
-        // Case 7.4: Starting state maintained (within timeout)
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(5); // 5 minutes ago (within 10 minute timeout)
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Starting, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Starting);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::Starting));
-        assert_eq!(record.state_transited_at, previous_time); // No change
-    }
+    test_state_preserved!(
+        test_starting_state_maintained_within_timeout,
+        HealthState::Starting,
+        WorkerInstanceState::Starting,
+        None,
+        HealthState::Starting
+    );
 
     #[test]
     fn test_starting_timeout_exceeded() {
-        // Case 7.5: Starting timeout exceeded → MarkedForTermination
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(11); // 11 minutes ago (exceeds 10 minute timeout)
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Starting, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Starting);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::MarkedForTermination));
-        assert_eq!(record.state_transited_at, start_time);
+        fixture
+            .with_record("worker1", HealthState::Starting, TimeDelta::minutes(-11)) // 11 mins ago
+            .with_response("worker1", WorkerInstanceState::Starting, None)
+            .run()
+            .assert_state_matches("worker1", |s| {
+                matches!(s, HealthState::MarkedForTermination)
+            })
+            .assert_transited_at("worker1", start_time);
     }
 
     #[test]
     fn test_starting_worker_disappears_from_infra() {
-        // Case 7.6: Starting state worker disappears from infrastructure
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Starting, previous_time),
-        );
-
-        let response_map = WorkerHealthResponseMap::new(); // Empty map
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::InvisibleOnInfra));
-        assert_eq!(record.state_transited_at, start_time);
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
+        fixture
+            .with_record("worker1", HealthState::Starting, TimeDelta::minutes(-1))
+            .run()
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::InvisibleOnInfra))
+            .assert_transited_at("worker1", start_time);
     }
 
     // ========================================
@@ -1045,222 +719,67 @@ mod tests {
 
     #[test]
     fn test_new_worker_in_terminating_state_is_ignored() {
-        // Case 8.1: New worker in Terminating state is not added to records
-        let start_time = Utc::now();
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-        let mut health_records = HealthRecords::new();
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        assert_eq!(health_records.len(), 0);
+        let fixture = TestFixture::new();
+        fixture
+            .with_response("worker1", WorkerInstanceState::Terminating, None)
+            .run()
+            .assert_no_record("worker1");
     }
 
-    #[test]
-    fn test_healthy_worker_transitions_to_terminated_confirm() {
-        // Case 8.2: Healthy worker transitions to TerminatedConfirm when infrastructure reports Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Healthy { ip: test_ip() }, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, start_time);
+    macro_rules! test_terminating_transition {
+        ($name:ident, $start_state:expr) => {
+            test_transition!(
+                $name,
+                $start_state,
+                WorkerInstanceState::Terminating,
+                None,
+                HealthState::TerminatedConfirm
+            );
+        };
     }
 
-    #[test]
-    fn test_starting_worker_transitions_to_terminated_confirm() {
-        // Case 8.3: Starting worker transitions to TerminatedConfirm when Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
+    test_terminating_transition!(
+        test_healthy_worker_transitions_to_terminated_confirm,
+        HealthState::Healthy { ip: test_ip() }
+    );
+    test_terminating_transition!(
+        test_starting_worker_transitions_to_terminated_confirm,
+        HealthState::Starting
+    );
+    test_terminating_transition!(
+        test_retrying_check_worker_transitions_to_terminated_confirm,
+        HealthState::RetryingCheck { retrials: 2 }
+    );
+    test_terminating_transition!(
+        test_graceful_shutting_down_worker_transitions_to_terminated_confirm,
+        HealthState::GracefulShuttingDown
+    );
+    test_terminating_transition!(
+        test_marked_for_termination_worker_transitions_to_terminated_confirm,
+        HealthState::MarkedForTermination
+    );
+    test_terminating_transition!(
+        test_invisible_on_infra_worker_transitions_to_terminated_confirm,
+        HealthState::InvisibleOnInfra
+    );
 
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::Starting, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_retrying_check_worker_transitions_to_terminated_confirm() {
-        // Case 8.4: RetryingCheck worker transitions to TerminatedConfirm when Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::RetryingCheck { retrials: 2 }, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_graceful_shutting_down_worker_transitions_to_terminated_confirm() {
-        // Case 8.5: GracefulShuttingDown worker transitions to TerminatedConfirm when Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::GracefulShuttingDown, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_marked_for_termination_worker_transitions_to_terminated_confirm() {
-        // Case 8.6: MarkedForTermination worker transitions to TerminatedConfirm when Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::MarkedForTermination, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, start_time);
-    }
-
-    #[test]
-    fn test_terminated_confirm_stays_unchanged_when_terminating() {
-        // Case 8.7: Already TerminatedConfirm worker stays unchanged when Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::TerminatedConfirm, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, previous_time); // No change
-    }
-
-    #[test]
-    fn test_invisible_on_infra_worker_transitions_to_terminated_confirm() {
-        // Case 8.8: InvisibleOnInfra worker transitions to TerminatedConfirm when reappears as Terminating
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::InvisibleOnInfra, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Terminating);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(worker_id("worker1"), (worker_info, None));
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::TerminatedConfirm));
-        assert_eq!(record.state_transited_at, start_time);
-    }
+    test_state_preserved!(
+        test_terminated_confirm_stays_unchanged_when_terminating,
+        HealthState::TerminatedConfirm,
+        WorkerInstanceState::Terminating,
+        None,
+        HealthState::TerminatedConfirm
+    );
 
     // ========================================
     // 9. Edge Cases
     // ========================================
 
-    #[test]
-    fn test_terminated_confirm_receives_graceful_shutdown_signal() {
-        // Case 8.1: Receiving Graceful signal again after termination confirmed
-        let start_time = Utc::now();
-        let previous_time = start_time - TimeDelta::minutes(1);
-        let context = create_test_context(start_time, TimeDelta::minutes(5), 3);
-
-        let mut health_records = HealthRecords::new();
-        health_records.insert(
-            worker_id("worker1"),
-            create_health_record(HealthState::TerminatedConfirm, previous_time),
-        );
-
-        let worker_info = create_worker_info("worker1", WorkerInstanceState::Running);
-        let mut response_map = WorkerHealthResponseMap::new();
-        response_map.insert(
-            worker_id("worker1"),
-            (
-                worker_info,
-                Some(WorkerHealthResponse {
-                    kind: WorkerHealthKind::GracefulShuttingDown,
-                    ip: test_ip(),
-                }),
-            ),
-        );
-
-        update_health_records(&context, &mut health_records, response_map).unwrap();
-
-        let record = health_records.get(&worker_id("worker1")).unwrap();
-        assert!(matches!(record.state, HealthState::GracefulShuttingDown));
-        assert_eq!(record.state_transited_at, start_time);
-    }
+    test_transition!(
+        test_terminated_confirm_receives_graceful_shutdown_signal,
+        HealthState::TerminatedConfirm,
+        WorkerInstanceState::Running,
+        Some(WorkerHealthKind::GracefulShuttingDown),
+        HealthState::GracefulShuttingDown
+    );
 }
