@@ -144,7 +144,7 @@ impl Compute for crate::core::OciClient {
             );
 
             // Make DELETE request
-            let oci_response = self.delete::<()>(&path).await?;
+            let oci_response = self.delete::<crate::core::EmptyResponse>(&path).await?;
 
             // Extract request tracking headers
             let opc_request_id = oci_response.get_header("opc-request-id");
