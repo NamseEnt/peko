@@ -36,7 +36,9 @@ impl CloudflareDns {
         #[derive(Debug, serde::Deserialize)]
         struct CloudflareDnsRecordsResponse {
             success: bool,
-            result: Vec<RecordResponse>,
+            result: Option<Vec<RecordResponse>>,
+            #[allow(dead_code)]
+            errors: serde_json::Value,
         }
 
         #[derive(Debug, serde::Deserialize)]
@@ -66,6 +68,7 @@ impl CloudflareDns {
 
         Ok(response
             .result
+            .unwrap_or_default()
             .into_iter()
             .filter(|record| record.r#type == "A" || record.r#type == "AAAA")
             .map(|record| Record {
@@ -94,12 +97,17 @@ impl Dns for CloudflareDns {
 
             #[derive(serde::Serialize)]
             struct Body<'a> {
-                deletes: Vec<&'a str>,
-                posts: Vec<BodyRecord<'a>>,
+                deletes: Vec<Delete<'a>>,
+                posts: Vec<Post<'a>>,
             }
 
             #[derive(serde::Serialize)]
-            struct BodyRecord<'a> {
+            struct Delete<'a> {
+                id: &'a str,
+            }
+
+            #[derive(serde::Serialize)]
+            struct Post<'a> {
                 name: &'a str,
                 ttl: usize,
                 r#type: &'static str,
@@ -116,9 +124,13 @@ impl Dns for CloudflareDns {
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {}", self.api_token))
                 .body(serde_json::to_string(&Body {
-                    deletes: deleted_ips.map(|record| record.id.as_str()).collect(),
+                    deletes: deleted_ips
+                        .map(|record| Delete {
+                            id: record.id.as_str(),
+                        })
+                        .collect(),
                     posts: new_ips
-                        .map(|ip| BodyRecord {
+                        .map(|ip| Post {
                             name: &self.asterisk_domain,
                             ttl: 60,
                             r#type: match ip {

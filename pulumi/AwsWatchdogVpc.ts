@@ -70,22 +70,6 @@ export class AwsWatchdogVpc extends pulumi.ComponentResource {
       routeTableId: routeTable.id,
     });
 
-    new aws.ec2.VpcEndpoint("dynamodb-endpoint", {
-      region,
-      vpcId: vpc.id,
-      serviceName: pulumi.interpolate`com.amazonaws.${region}.dynamodb`,
-      vpcEndpointType: "Gateway",
-      routeTableIds: [routeTable.id],
-    });
-
-    new aws.ec2.VpcEndpoint("s3-endpoint", {
-      region,
-      vpcId: vpc.id,
-      serviceName: pulumi.interpolate`com.amazonaws.${region}.s3`,
-      vpcEndpointType: "Gateway",
-      routeTableIds: [routeTable.id],
-    });
-
     const securityGroup = new aws.ec2.SecurityGroup("ipv6-lambda-sg", {
       region,
       vpcId: vpc.id,
@@ -113,15 +97,5 @@ export class AwsWatchdogVpc extends pulumi.ComponentResource {
       ],
     });
     this.securityGroupId = securityGroup.id;
-
-    new aws.ec2.VpcEndpoint("lambda-endpoint", {
-      region,
-      vpcId: vpc.id,
-      vpcEndpointType: "Interface",
-      serviceName: pulumi.interpolate`com.amazonaws.${region}.lambda`,
-      subnetIds: [subnet.id],
-      securityGroupIds: [securityGroup.id],
-      privateDnsEnabled: true,
-    });
   }
 }

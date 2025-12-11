@@ -115,3 +115,10 @@
 
 - [ ] endpoint
 - [ ] status: graceful shutting down
+
+## static file serving
+
+- [ ] cloudflare r2 pulumi setting
+- [ ] count GetObject by cloudflare graphql httpRequests1dGroups
+- [ ] count CreateObject by deployment system
+- [ ] deploy static files on cli

@@ -9,11 +9,12 @@ const zoneId = config.require("CLOUDFLARE_ZONE_ID");
 const domain = config.require("DOMAIN");
 const awsWatchdogRegion = config.require("AWS_WATCHDOG_REGION");
 
-const apiTokenPermissionGroups =
+const apiTokenPermissionGroups = Promise.all([
   cloudflare.getAccountApiTokenPermissionGroupsList({
     accountId,
     name: "DNS Write",
-  });
+  }),
+]).then((x) => x.flatMap((x) => x.results.map((x) => ({ id: x.id }))));
 
 const awsWatchdogVpc = new fn0.AwsWatchdogVpc("awsWatchdogVpc", {
   region: awsWatchdogRegion,
@@ -28,16 +29,9 @@ const cloudflareApiToken = new cloudflare.AccountToken("cloudflareApiToken", {
       resources: {
         [`com.cloudflare.api.account.zone.${zoneId}`]: "*",
       },
-      permissionGroups: apiTokenPermissionGroups.then((x) =>
-        x.results.map((x) => ({ id: x.id }))
-      ),
+      permissionGroups: apiTokenPermissionGroups,
     },
   ],
-  condition: {
-    requestIp: {
-      ins: [awsWatchdogVpc.ipv6CidrBlock],
-    },
-  },
 });
 
 const ociComputeWorker = new fn0.OciComputeWorker("ociComputeWorker", {
@@ -60,6 +54,10 @@ const awsWatchdog = new fn0.AwsWatchdog("awsWatchdog", {
     CLOUDFLARE_ASTERISK_DOMAIN: `*.${domain}`,
     CLOUDFLARE_ZONE_ID: zoneId,
   },
+});
+
+new fn0.B2CloudflareStaticCdn("b2CloudflareStaticCdn", {
+  zoneId,
 });
 
 export const watchdogLambdaFunctionName = awsWatchdog.lambdaFunctionName;

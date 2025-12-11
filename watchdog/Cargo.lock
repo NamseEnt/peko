@@ -1956,21 +1956,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oci-lambda-proxy"
-version = "0.1.0"
-dependencies = [
- "aws-config",
- "aws-sdk-lambda",
- "base64 0.22.1",
- "color-eyre",
- "lambda_runtime",
- "oci-rust-sdk",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "oci-rust-sdk"
 version = "0.1.0"
 dependencies = [
@@ -3375,17 +3360,18 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-sdk-s3",
+ "base64 0.22.1",
  "chrono",
  "color-eyre",
  "futures",
  "lambda_runtime",
- "oci-lambda-proxy",
  "oci-rust-sdk",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "wiremock",
+ "worker-health-checker",
 ]
 
 [[package]]
@@ -3726,6 +3712,21 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
+
+[[package]]
+name = "worker-health-checker"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-lambda",
+ "color-eyre",
+ "futures",
+ "lambda_runtime",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "writeable"

@@ -53,16 +53,16 @@ export class AwsWatchdog extends pulumi.ComponentResource {
 
     const lockDdb = setLockDdb(region);
     const healthRecordBucket = setHealthRecordBucket(region);
-    const ociLambdaProxy = setOciLambdaProxy(region, ociWorkerInfraEnvs);
+    const workerHealthChecker = setWorkerHealthChecker(
+      region,
+      subnetId,
+      securityGroupId
+    );
 
     const lambdaFunction = new aws.lambda.Function("watchdog", {
       region,
       timeout: 30,
       architectures: ["arm64"],
-      vpcConfig: {
-        subnetIds: [subnetId],
-        securityGroupIds: [securityGroupId],
-      },
       code: new FileArchive("../watchdog/target/lambda/watchdog/bootstrap.zip"),
       handler: "bootstrap",
       packageType: "Zip",
@@ -87,7 +87,7 @@ export class AwsWatchdog extends pulumi.ComponentResource {
             MAX_STARTING_COUNT: pulumi.jsonStringify(maxStartingCount),
             HEALTH_RECORD_BUCKET_NAME: healthRecordBucket.bucket,
             LOCK_TABLE_NAME: lockDdb.name,
-            OCI_LAMBDA_PROXY_FN_NAME: ociLambdaProxy.lambdaFunction.name,
+            WORKER_HEALTH_CHECKER_FN_NAME: workerHealthChecker.lambdaFunction.name,
             ...ociWorkerInfraEnvs,
             ...cloudflareEnvs,
           })),
@@ -130,7 +130,7 @@ export class AwsWatchdog extends pulumi.ComponentResource {
                   {
                     Effect: "Allow",
                     Action: ["lambda:InvokeFunction"],
-                    Resource: ociLambdaProxy.lambdaFunction.arn,
+                    Resource: workerHealthChecker.lambdaFunction.arn,
                   },
                 ],
               } satisfies aws.iam.PolicyDocument)
@@ -138,7 +138,6 @@ export class AwsWatchdog extends pulumi.ComponentResource {
           },
         ],
         managedPolicyArns: [
-          aws.iam.ManagedPolicy.AWSLambdaVPCAccessExecutionRole,
           aws.iam.ManagedPolicy.AWSLambdaBasicExecutionRole,
         ],
       }).arn,
@@ -164,29 +163,31 @@ export class AwsWatchdog extends pulumi.ComponentResource {
   }
 }
 
-function setOciLambdaProxy(
+function setWorkerHealthChecker(
   region: pulumi.Input<string>,
-  ociWorkerInfraEnvs: pulumi.Input<OciWorkerInfraEnvs>
+  subnetId: pulumi.Input<string>,
+  securityGroupId: pulumi.Input<string>
 ) {
-  const lambdaFunction = new aws.lambda.Function("oci-lambda-proxy", {
+  const lambdaFunction = new aws.lambda.Function("worker-health-checker", {
     region,
     timeout: 30,
     architectures: ["arm64"],
+    vpcConfig: {
+      subnetIds: [subnetId],
+      securityGroupIds: [securityGroupId],
+    },
     code: new FileArchive(
-      "../oci-lambda-proxy/target/lambda/oci-lambda-proxy/bootstrap.zip"
+      "../worker-health-checker/target/lambda/worker-health-checker/bootstrap.zip"
     ),
     handler: "bootstrap",
     packageType: "Zip",
     runtime: "provided.al2023",
     environment: {
-      variables: pulumi
-        .output(ociWorkerInfraEnvs)
-        .apply((ociWorkerInfraEnvs) => ({
-          RUST_BACKTRACE: "1",
-          ...ociWorkerInfraEnvs,
-        })),
+      variables: {
+        RUST_BACKTRACE: "1",
+      },
     },
-    role: new aws.iam.Role("oci-lambda-proxy-role", {
+    role: new aws.iam.Role("worker-health-checker-role", {
       assumeRolePolicy: {
         Version: "2012-10-17",
         Statement: [
@@ -199,7 +200,10 @@ function setOciLambdaProxy(
           },
         ],
       },
-      managedPolicyArns: [aws.iam.ManagedPolicy.AWSLambdaBasicExecutionRole],
+      managedPolicyArns: [
+        aws.iam.ManagedPolicy.AWSLambdaVPCAccessExecutionRole,
+        aws.iam.ManagedPolicy.AWSLambdaBasicExecutionRole,
+      ],
     }).arn,
   });
 

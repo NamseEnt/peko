@@ -1,16 +1,9 @@
-pub mod oci_lambda_proxy;
+pub mod oci;
 
 use crate::WorkerId;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use std::{
-    collections::BTreeMap,
-    future::Future,
-    net::{IpAddr, SocketAddr},
-    pin::Pin,
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::BTreeMap, env, future::Future, net::IpAddr, pin::Pin, str::FromStr};
 
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
@@ -63,44 +56,43 @@ impl dyn WorkerInfra {
     ) -> color_eyre::Result<WorkerHealthResponseMap> {
         let workers_infos = self.get_worker_infos().await?;
         println!("workers_infos: {workers_infos:?}");
-        Ok(futures::stream::iter(workers_infos)
-            .map(|worker_info| async move {
-                let Some(ip) = worker_info.ip else {
-                    return (worker_info.id.clone(), (worker_info, None));
-                };
-                let addr = SocketAddr::new(ip, port);
-                let Ok(res) = reqwest::Client::builder()
-                    .resolve(&format!("a.{domain}"), addr)
-                    .timeout(Duration::from_secs(2))
-                    .build()
-                    .unwrap()
-                    .get(format!("{scheme}://a.{domain}:{port}/health"))
-                    .send()
-                    .await
-                else {
-                    return (worker_info.id.clone(), (worker_info, None));
-                };
 
-                if !res.status().is_success() {
-                    return (worker_info.id.clone(), (worker_info, None));
-                }
+        let fn_name = env::var("WORKER_HEALTH_CHECKER_FN_NAME")
+            .expect("env var WORKER_HEALTH_CHECKER_FN_NAME is not set");
+        let checker = ::worker_health_checker::WorkerHealthChecker::new(fn_name).await;
 
-                let Ok(body) = res.text().await else {
-                    return (worker_info.id.clone(), (worker_info, None));
-                };
+        let ips: Vec<IpAddr> = workers_infos.iter().filter_map(|info| info.ip).collect();
 
-                let Ok(kind) = body.parse::<WorkerHealthKind>() else {
-                    panic!("Failed to parse health response: {body}");
-                };
+        let response = checker
+            .check_health(ips, domain.to_string(), port, scheme.to_string())
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to check health: {}", e))?;
 
-                (
-                    worker_info.id.clone(),
-                    (worker_info, Some(WorkerHealthResponse { kind, ip })),
-                )
+        let health_map: std::collections::HashMap<IpAddr, ::worker_health_checker::HealthStatus> =
+            response
+                .results
+                .into_iter()
+                .filter_map(|result| result.status.map(|status| (result.ip, status)))
+                .collect();
+
+        Ok(workers_infos
+            .into_iter()
+            .map(|worker_info| {
+                let health_response = worker_info.ip.and_then(|ip| {
+                    health_map.get(&ip).map(|status| WorkerHealthResponse {
+                        kind: match status {
+                            ::worker_health_checker::HealthStatus::Good => WorkerHealthKind::Good,
+                            ::worker_health_checker::HealthStatus::GracefulShuttingDown => {
+                                WorkerHealthKind::GracefulShuttingDown
+                            }
+                        },
+                        ip,
+                    })
+                });
+
+                (worker_info.id.clone(), (worker_info, health_response))
             })
-            .buffer_unordered(32)
-            .collect()
-            .await)
+            .collect())
     }
 
     pub async fn send_terminate_workers(&self, worker_ids: impl IntoIterator<Item = WorkerId>) {
@@ -173,6 +165,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_worker_health_responses_all_good() {
+        unsafe {
+            env::set_var("WORKER_HEALTH_CHECKER_FN_NAME", "test_fn");
+        }
         let mock_server = MockServer::start().await;
         let uri = mock_server.uri();
         let uri = uri.strip_prefix("http://").unwrap();
@@ -209,6 +204,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_worker_health_responses_partial_failure() {
+        unsafe {
+            env::set_var("WORKER_HEALTH_CHECKER_FN_NAME", "test_fn");
+        }
         let mock_server = MockServer::start().await;
         let uri = mock_server.uri();
         let uri = uri.strip_prefix("http://").unwrap();
@@ -258,6 +256,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_worker_health_responses_500() {
+        unsafe {
+            env::set_var("WORKER_HEALTH_CHECKER_FN_NAME", "test_fn");
+        }
         let mock_server = MockServer::start().await;
         let uri = mock_server.uri();
         let uri = uri.strip_prefix("http://").unwrap();

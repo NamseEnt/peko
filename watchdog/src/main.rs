@@ -55,7 +55,7 @@ use health_recorder::HealthRecorder;
 use lambda_runtime::{LambdaEvent, service_fn, tracing};
 use lock::Lock;
 use std::{env, sync::Arc};
-use worker_infra::{WorkerInfra, oci_lambda_proxy::OciLambdaProxyWorkerInfra};
+use worker_infra::{WorkerInfra, oci::OciWorkerInfra};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -106,7 +106,7 @@ fn main() {
                 env::var("WORKER_INFRA_AT").expect("env var WORKER_INFRA_AT is not set");
             println!("worker_infra_at: {worker_infra_at}");
             let worker_infra: Arc<dyn WorkerInfra> = match worker_infra_at.as_str() {
-                "oci" => Arc::new(OciLambdaProxyWorkerInfra::new().await),
+                "oci" => Arc::new(OciWorkerInfra::new().await),
                 _ => panic!("unknown worker infra type {worker_infra_at}"),
             };
 
@@ -188,7 +188,7 @@ async fn run_watchdog(
             .then(|result| async {
                 match result {
                     Ok(_) => println!("Successfully wrote health records"),
-                    Err(err) => eprintln!("Failed to write health records: {err}"),
+                    Err(err) => eprintln!("Failed to write health records: {err:?}"),
                 }
             }),
         try_scale_out(
@@ -200,7 +200,7 @@ async fn run_watchdog(
         .then(|result| async {
             match result {
                 Ok(_) => println!("Successfully scaled out"),
-                Err(err) => eprintln!("Failed to scale out: {err}"),
+                Err(err) => eprintln!("Failed to scale out: {err:?}"),
             }
         }),
         worker_infra
@@ -209,7 +209,7 @@ async fn run_watchdog(
         dns.sync_ips(helathy_ips).then(|result| async {
             match result {
                 Ok(_) => println!("Successfully synced ips"),
-                Err(err) => eprintln!("Failed to sync ips: {err}"),
+                Err(err) => eprintln!("Failed to sync ips: {err:?}"),
             }
         }),
     );

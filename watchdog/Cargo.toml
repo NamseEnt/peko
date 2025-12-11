@@ -10,12 +10,13 @@ debug = true
 aws-config = "1.8.11"
 aws-sdk-dynamodb = "1.100.0"
 aws-sdk-s3 = "1.115.0"
+base64 = "0.22.1"
 chrono = "0.4.42"
 color-eyre = "0.6.5"
 futures = "0.3.31"
 lambda_runtime = "1.0.1"
 oci-rust-sdk = { path = "../oci-rust-sdk", features = ["compute"] }
-oci-lambda-proxy = { path = "../oci-lambda-proxy" }
+worker-health-checker = { path = "../worker-health-checker" }
 reqwest = { version = "0.12.24", default-features = false, features = [
     "rustls-tls",
 ] }

@@ -1,29 +1,70 @@
 use super::*;
 use crate::*;
+use base64::Engine;
 use futures::TryStreamExt;
 use oci_rust_sdk::compute::*;
+use oci_rust_sdk::core::{
+    RetryConfig,
+    auth::{SimpleAuthProvider, SimpleAuthProviderRequiredFields},
+    region::Region,
+};
 use std::{env, net::IpAddr, str::FromStr};
 
-pub struct OciLambdaProxyWorkerInfra {
-    proxy: ::oci_lambda_proxy::OciLambdaProxy,
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub struct OciWorkerInfra {
+    compute: Arc<dyn oci_rust_sdk::compute::Compute>,
     compartment_id: String,
     instance_configuration_id: String,
     availability_domain: String,
 }
 
-impl OciLambdaProxyWorkerInfra {
+impl OciWorkerInfra {
     pub async fn new() -> Self {
+        let private_key_base64 =
+            env::var("OCI_PRIVATE_KEY_BASE64").expect("env var OCI_PRIVATE_KEY_BASE64 is not set");
+        let user_id = env::var("OCI_USER_ID").expect("env var OCI_USER_ID is not set");
+        let fingerprint = env::var("OCI_FINGERPRINT").expect("env var OCI_FINGERPRINT is not set");
+        let tenancy_id = env::var("OCI_TENANCY_ID").expect("env var OCI_TENANCY_ID is not set");
+        let region = env::var("OCI_REGION").expect("env var OCI_REGION is not set");
+
         let compartment_id =
             env::var("OCI_COMPARTMENT_ID").expect("env var OCI_COMPARTMENT_ID is not set");
         let instance_configuration_id = env::var("OCI_INSTANCE_CONFIGURATION_ID")
             .expect("env var OCI_INSTANCE_CONFIGURATION_ID is not set");
         let availability_domain = env::var("OCI_AVAILABILITY_DOMAIN")
             .expect("env var OCI_AVAILABILITY_DOMAIN is not set");
-        let fn_name = env::var("OCI_LAMBDA_PROXY_FN_NAME")
-            .expect("env var OCI_LAMBDA_PROXY_FN_NAME is not set");
-        let proxy = ::oci_lambda_proxy::OciLambdaProxy::new(fn_name).await;
+
+        let private_key = String::from_utf8_lossy(
+            &base64::engine::general_purpose::STANDARD
+                .decode(private_key_base64)
+                .unwrap(),
+        )
+        .to_string();
+
+        let region = Region::from_str(&region).unwrap_or_else(|_| {
+            panic!("invalid region {region}");
+        });
+
+        let auth_provider = SimpleAuthProvider::builder(SimpleAuthProviderRequiredFields {
+            tenancy: tenancy_id,
+            user: user_id,
+            fingerprint,
+            private_key,
+        })
+        .region(region)
+        .build();
+
+        let compute = oci_rust_sdk::compute::client(oci_rust_sdk::core::ClientConfig {
+            auth_provider,
+            region,
+            timeout: DEFAULT_TIMEOUT,
+            retry: RetryConfig::no_retry(),
+        })
+        .unwrap();
+
         Self {
-            proxy,
+            compute,
             compartment_id,
             instance_configuration_id,
             availability_domain,
@@ -31,7 +72,7 @@ impl OciLambdaProxyWorkerInfra {
     }
 }
 
-impl WorkerInfra for OciLambdaProxyWorkerInfra {
+impl WorkerInfra for OciWorkerInfra {
     fn get_worker_infos<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = color_eyre::Result<WorkerInfos>> + 'a + Send>> {
@@ -42,7 +83,7 @@ impl WorkerInfra for OciLambdaProxyWorkerInfra {
             loop {
                 println!("on loop top");
                 let response = self
-                    .proxy
+                    .compute
                     .list_instances(ListInstancesRequest {
                         compartment_id: self.compartment_id.clone(),
                         limit: None,
@@ -97,7 +138,7 @@ impl WorkerInfra for OciLambdaProxyWorkerInfra {
         worker_id: &'a WorkerId,
     ) -> Pin<Box<dyn Future<Output = color_eyre::Result<()>> + 'a + Send>> {
         Box::pin(async move {
-            self.proxy
+            self.compute
                 .terminate_instance(TerminateInstanceRequest {
                     instance_id: worker_id.0.clone(),
                     if_match: None,
@@ -116,7 +157,7 @@ impl WorkerInfra for OciLambdaProxyWorkerInfra {
         Box::pin(async move {
             futures::stream::iter(0..count)
                 .map(|_| async move {
-                    self.proxy
+                    self.compute
                         .launch_instance_configuration(LaunchInstanceConfigurationRequest {
                             instance_configuration_id: self.instance_configuration_id.clone(),
                             instance_configuration: InstanceConfigurationInstanceDetails::Compute(
