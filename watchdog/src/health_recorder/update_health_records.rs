@@ -75,12 +75,19 @@ pub fn update_health_records(
 
         match health_response {
             Some(worker_health_response) => match worker_health_response.kind {
-                WorkerHealthKind::Good => {
-                    record.state = HealthState::Healthy {
-                        ip: worker_health_response.ip,
-                    };
-                    record.state_transited_at = start_time;
-                }
+                WorkerHealthKind::Good => match record.state {
+                    HealthState::GracefulShuttingDown => {
+                        // Once in GracefulShuttingDown, we should not revert to Healthy even if the worker reports Good.
+                        // We might optionally update the timestamp to reflect it's still alive, but keeping the state is key.
+                        // For now, let's just do nothing to preserve the shutdown state.
+                    }
+                    _ => {
+                        record.state = HealthState::Healthy {
+                            ip: worker_health_response.ip,
+                        };
+                        record.state_transited_at = start_time;
+                    }
+                },
                 WorkerHealthKind::GracefulShuttingDown => match record.state {
                     HealthState::Starting
                     | HealthState::Healthy { .. }
@@ -782,4 +789,52 @@ mod tests {
         Some(WorkerHealthKind::GracefulShuttingDown),
         HealthState::GracefulShuttingDown
     );
+
+    #[test]
+    fn test_terminating_priority_over_healthy_response() {
+        // Case 1: Terminating status from Infra should override Good health response
+        let fixture = TestFixture::new();
+        let start_time = fixture.start_time();
+
+        fixture
+            .with_record(
+                "worker1",
+                HealthState::Healthy { ip: test_ip() },
+                TimeDelta::minutes(-1),
+            )
+            .with_response(
+                "worker1",
+                WorkerInstanceState::Terminating,
+                Some(WorkerHealthKind::Good),
+            )
+            .run()
+            .assert_state_matches("worker1", |s| matches!(s, HealthState::TerminatedConfirm))
+            .assert_transited_at("worker1", start_time);
+    }
+
+    #[test]
+    fn test_graceful_shutdown_cannot_recover_to_healthy() {
+        // Case 2: Once GracefulShuttingDown, it should NEVER go back to Healthy
+        let fixture = TestFixture::new();
+        let previous_time = fixture.previous_time(2); // 2 minutes ago
+
+        fixture
+            .with_record(
+                "worker1",
+                HealthState::GracefulShuttingDown,
+                TimeDelta::minutes(-2),
+            )
+            .with_response(
+                "worker1",
+                WorkerInstanceState::Running,
+                Some(WorkerHealthKind::Good),
+            )
+            .run()
+            .assert_state_matches("worker1", |s| {
+                matches!(s, HealthState::GracefulShuttingDown)
+            })
+            // The logic we implemented preserves the state but effectively does "nothing" in the match arm,
+            // so the timestamp should remain unchanged (from 2 mins ago).
+            .assert_transited_at("worker1", previous_time);
+    }
 }
