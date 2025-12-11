@@ -51,6 +51,16 @@ impl dyn WorkerInfra {
         &self,
         domain: &str,
     ) -> color_eyre::Result<WorkerHealthResponseMap> {
+        self.get_worker_health_responses_with_options(domain, 443, "https")
+            .await
+    }
+
+    async fn get_worker_health_responses_with_options(
+        &self,
+        domain: &str,
+        port: u16,
+        scheme: &str,
+    ) -> color_eyre::Result<WorkerHealthResponseMap> {
         let workers_infos = self.get_worker_infos().await?;
         println!("workers_infos: {workers_infos:?}");
         Ok(futures::stream::iter(workers_infos)
@@ -58,13 +68,13 @@ impl dyn WorkerInfra {
                 let Some(ip) = worker_info.ip else {
                     return (worker_info.id.clone(), (worker_info, None));
                 };
-                let addr = SocketAddr::new(ip, 443);
+                let addr = SocketAddr::new(ip, port);
                 let Ok(res) = reqwest::Client::builder()
                     .resolve(&format!("a.{domain}"), addr)
                     .timeout(Duration::from_secs(2))
                     .build()
                     .unwrap()
-                    .get(format!("https://a.{domain}/health"))
+                    .get(format!("{scheme}://a.{domain}:{port}/health"))
                     .send()
                     .await
                 else {
@@ -125,5 +135,158 @@ impl FromStr for WorkerHealthKind {
             "graceful_shutting_down" => Ok(WorkerHealthKind::GracefulShuttingDown),
             _ => color_eyre::eyre::bail!("invalid health response: {}", s),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct MockWorkerInfra {
+        workers: WorkerInfos,
+    }
+
+    impl WorkerInfra for MockWorkerInfra {
+        fn get_worker_infos<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = color_eyre::Result<WorkerInfos>> + 'a + Send>> {
+            let workers = self.workers.clone();
+            Box::pin(async move { Ok(workers) })
+        }
+
+        fn terminate<'a>(
+            &'a self,
+            _worker_id: &'a WorkerId,
+        ) -> Pin<Box<dyn Future<Output = color_eyre::Result<()>> + 'a + Send>> {
+            unimplemented!()
+        }
+
+        fn launch_instances<'a>(
+            &'a self,
+            _count: usize,
+        ) -> Pin<Box<dyn Future<Output = color_eyre::Result<()>> + 'a + Send>> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_worker_health_responses_all_good() {
+        let mock_server = MockServer::start().await;
+        let uri = mock_server.uri();
+        let uri = uri.strip_prefix("http://").unwrap();
+        let mut parts = uri.split(':');
+        let ip: IpAddr = parts.next().unwrap().parse().unwrap();
+        let port: u16 = parts.next().unwrap().parse().unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("good"))
+            .mount(&mock_server)
+            .await;
+
+        let workers = vec![WorkerInfo {
+            id: WorkerId("worker_1".to_string()),
+            instance_created: Utc::now(),
+            ip: Some(ip),
+            instance_state: WorkerInstanceState::Running,
+        }];
+
+        let infra = MockWorkerInfra { workers };
+        let infra: &dyn WorkerInfra = &infra;
+        let responses = infra
+            .get_worker_health_responses_with_options("example.com", port, "http")
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        let (_, response) = responses.get(&WorkerId("worker_1".to_string())).unwrap();
+        let response = response.as_ref().unwrap();
+        assert!(matches!(response.kind, WorkerHealthKind::Good));
+        assert_eq!(response.ip, ip);
+    }
+
+    #[tokio::test]
+    async fn test_get_worker_health_responses_partial_failure() {
+        let mock_server = MockServer::start().await;
+        let uri = mock_server.uri();
+        let uri = uri.strip_prefix("http://").unwrap();
+        let mut parts = uri.split(':');
+        let ip: IpAddr = parts.next().unwrap().parse().unwrap();
+        let port: u16 = parts.next().unwrap().parse().unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("good"))
+            .mount(&mock_server)
+            .await;
+
+        let workers = vec![
+            WorkerInfo {
+                id: WorkerId("worker_ok".to_string()),
+                instance_created: Utc::now(),
+                ip: Some(ip),
+                instance_state: WorkerInstanceState::Running,
+            },
+            WorkerInfo {
+                id: WorkerId("worker_unreachable".to_string()),
+                instance_created: Utc::now(),
+                ip: Some("192.0.2.0".parse().unwrap()),
+                instance_state: WorkerInstanceState::Running,
+            },
+        ];
+
+        let infra = MockWorkerInfra { workers };
+        // The unreachable worker will timeout after 2 seconds.
+        let infra: &dyn WorkerInfra = &infra;
+        let responses = infra
+            .get_worker_health_responses_with_options("example.com", port, "http")
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 2);
+
+        let (_, res_ok) = responses.get(&WorkerId("worker_ok".to_string())).unwrap();
+        assert!(res_ok.is_some());
+
+        let (_, res_bad) = responses
+            .get(&WorkerId("worker_unreachable".to_string()))
+            .unwrap();
+        assert!(res_bad.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_worker_health_responses_500() {
+        let mock_server = MockServer::start().await;
+        let uri = mock_server.uri();
+        let uri = uri.strip_prefix("http://").unwrap();
+        let mut parts = uri.split(':');
+        let ip: IpAddr = parts.next().unwrap().parse().unwrap();
+        let port: u16 = parts.next().unwrap().parse().unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let workers = vec![WorkerInfo {
+            id: WorkerId("worker_500".to_string()),
+            instance_created: Utc::now(),
+            ip: Some(ip),
+            instance_state: WorkerInstanceState::Running,
+        }];
+
+        let infra = MockWorkerInfra { workers };
+        let infra: &dyn WorkerInfra = &infra;
+        let responses = infra
+            .get_worker_health_responses_with_options("example.com", port, "http")
+            .await
+            .unwrap();
+
+        // Should return None
+        let (_, res) = responses.get(&WorkerId("worker_500".to_string())).unwrap();
+        assert!(res.is_none());
     }
 }
