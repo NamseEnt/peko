@@ -78,6 +78,12 @@ impl TypeScriptGenerator {
 
         let pm_cmd = config.package_manager.command();
 
+        println!("  Installing {}...", config.framework);
+        let mut install_args = config.package_manager.install_args();
+        install_args.push(config.framework.package_name());
+
+        CommandExecutor::run(pm_cmd, &install_args, project_path).await?;
+
         println!("  Installing development dependencies...");
         let mut install_dev_args = config.package_manager.install_dev_args();
         install_dev_args.push("typescript");
@@ -88,12 +94,6 @@ impl TypeScriptGenerator {
         }
 
         CommandExecutor::run(pm_cmd, &install_dev_args, project_path).await?;
-
-        println!("  Installing {}...", config.framework);
-        let mut install_args = config.package_manager.install_args();
-        install_args.push(config.framework.package_name());
-
-        CommandExecutor::run(pm_cmd, &install_args, project_path).await?;
 
         Ok(())
     }
