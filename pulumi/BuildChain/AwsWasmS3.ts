@@ -24,6 +24,7 @@ export class AwsWasmS3 extends pulumi.ComponentResource {
     this.bucket = wasmBucket.bucket;
 
     new aws.s3.BucketLifecycleConfiguration("wasm-bucket-lifecycle", {
+      region,
       bucket: wasmBucket.bucket,
       rules: [
         {
@@ -66,6 +67,7 @@ export class AwsWasmS3 extends pulumi.ComponentResource {
     });
 
     const queuePolicy = new aws.sqs.QueuePolicy("allow-s3-send-message", {
+      region,
       queueUrl: queue.id,
       policy: queuePolicyDoc.json,
     });
@@ -73,6 +75,7 @@ export class AwsWasmS3 extends pulumi.ComponentResource {
     new aws.s3.BucketNotification(
       "bucket-notification",
       {
+        region,
         bucket: wasmBucket.bucket,
         queues: [
           {

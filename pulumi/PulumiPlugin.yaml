@@ -1,7 +1,0 @@
-runtime: nodejs
-packages:
-  b2:
-    source: terraform-provider
-    version: 1.0.2
-    parameters:
-      - backblaze/b2

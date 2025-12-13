@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 adapt-cache = { path = "../adapt-cache" }
 measure-cpu-time = { path = "../measure-cpu-time" }
-wasmtime = { version = "39", default-features = false, features = [
+wasmtime = { version = "39.0.1", default-features = false, features = [
     "runtime",
     "component-model",
     "component-model-async",
