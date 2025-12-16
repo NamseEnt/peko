@@ -12,7 +12,7 @@ pub struct CloudflareDns {
 }
 
 impl CloudflareDns {
-    pub async fn new(api_url: Option<String>) -> Self {
+    pub fn new(api_url: Option<String>) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .local_address("[::]:0".parse().ok())

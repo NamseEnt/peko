@@ -1,12 +1,12 @@
 use super::*;
 use base64::Engine;
-use futures::{StreamExt, TryStreamExt};
 use oci_rust_sdk::compute::*;
 use oci_rust_sdk::core::{
+    RetryConfig,
     auth::{SimpleAuthProvider, SimpleAuthProviderRequiredFields},
     region::Region,
-    RetryConfig,
 };
+use std::collections::BTreeSet;
 use std::{env, future::Future, net::IpAddr, pin::Pin, str::FromStr, sync::Arc};
 
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -19,7 +19,7 @@ pub struct OciHostInfra {
 }
 
 impl OciHostInfra {
-    pub async fn new() -> Self {
+    pub fn new() -> Self {
         let private_key_base64 =
             env::var("OCI_PRIVATE_KEY_BASE64").expect("env var OCI_PRIVATE_KEY_BASE64 is not set");
         let user_id = env::var("OCI_USER_ID").expect("env var OCI_USER_ID is not set");
@@ -72,72 +72,13 @@ impl OciHostInfra {
 }
 
 impl HostInfra for OciHostInfra {
-    fn get_host_infos<'a>(
+    fn sync_host_info_map<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = color_eyre::Result<HostInfos>> + 'a + Send>> {
-        Box::pin(async move {
-            let mut infos = vec![];
-            let mut page = None;
-
-            loop {
-                println!("on loop top");
-                let response = self
-                    .compute
-                    .list_instances(ListInstancesRequest {
-                        compartment_id: self.compartment_id.clone(),
-                        limit: None,
-                        page,
-                        availability_domain: None,
-                        capacity_reservation_id: None,
-                        compute_cluster_id: None,
-                        display_name: None,
-                        sort_by: None,
-                        sort_order: None,
-                        lifecycle_state: None,
-                    })
-                    .await?;
-
-                println!("got response with {} items", response.items.len());
-                infos.extend(response.items.into_iter().map(|instance| HostInfo {
-                    id: crate::watchdog::HostId(instance.id),
-                    ip: instance.freeform_tags.and_then(|tags| {
-                        let ip = tags.get("public_ip")?;
-                        let Ok(ip) = IpAddr::from_str(ip) else {
-                            panic!("Failed to parse IP address: {ip}");
-                        };
-                        Some(ip)
-                    }),
-                    instance_state: match instance.lifecycle_state {
-                        LifecycleState::Provisioning | LifecycleState::Starting => {
-                            HostInstanceState::Starting
-                        }
-                        LifecycleState::Running => HostInstanceState::Running,
-                        LifecycleState::Stopping
-                        | LifecycleState::Stopped
-                        | LifecycleState::Terminating
-                        | LifecycleState::Terminated => HostInstanceState::Terminating,
-                        LifecycleState::Moving | LifecycleState::CreatingImage => unreachable!(),
-                    },
-                    instance_created: instance.time_created,
-                }));
-
-                println!("processed items, next page: {:?}", response.opc_next_page);
-                if let Some(next_page) = response.opc_next_page {
-                    page = Some(next_page);
-                } else {
-                    break;
-                }
-            }
-            Ok(infos)
-        })
-    }
-
-    fn stream_host_infos<'a>(
-        &'a self,
-        tx: tokio::sync::mpsc::Sender<HostInfo>,
+        host_info_map: HostInfoMap,
     ) -> Pin<Box<dyn Future<Output = color_eyre::Result<()>> + 'a + Send>> {
         Box::pin(async move {
             let mut page = None;
+            let mut listed_host_ids = BTreeSet::new();
 
             loop {
                 let response = self
@@ -156,9 +97,16 @@ impl HostInfra for OciHostInfra {
                     })
                     .await?;
 
-                for instance in response.items {
+                listed_host_ids.extend(
+                    response
+                        .items
+                        .iter()
+                        .map(|instance| HostId::new(instance.id.clone())),
+                );
+
+                response.items.into_iter().for_each(|instance| {
                     let host_info = HostInfo {
-                        id: crate::watchdog::HostId(instance.id),
+                        id: HostId::new(instance.id),
                         ip: instance.freeform_tags.and_then(|tags| {
                             let ip = tags.get("public_ip")?;
                             let Ok(ip) = IpAddr::from_str(ip) else {
@@ -175,15 +123,14 @@ impl HostInfra for OciHostInfra {
                             | LifecycleState::Stopped
                             | LifecycleState::Terminating
                             | LifecycleState::Terminated => HostInstanceState::Terminating,
-                            LifecycleState::Moving | LifecycleState::CreatingImage => unreachable!(),
+                            LifecycleState::Moving | LifecycleState::CreatingImage => {
+                                unreachable!()
+                            }
                         },
                         instance_created: instance.time_created,
                     };
-
-                    if tx.send(host_info).await.is_err() {
-                        return Ok(());
-                    }
-                }
+                    host_info_map.insert(host_info.id.clone(), host_info);
+                });
 
                 if let Some(next_page) = response.opc_next_page {
                     page = Some(next_page);
@@ -191,18 +138,20 @@ impl HostInfra for OciHostInfra {
                     break;
                 }
             }
+
+            host_info_map.retain(|id, _| listed_host_ids.contains(id));
             Ok(())
         })
     }
 
     fn terminate<'a>(
         &'a self,
-        host_id: &'a crate::watchdog::HostId,
+        host_id: &'a crate::HostId,
     ) -> Pin<Box<dyn Future<Output = color_eyre::Result<()>> + 'a + Send>> {
         Box::pin(async move {
             self.compute
                 .terminate_instance(TerminateInstanceRequest {
-                    instance_id: host_id.0.clone(),
+                    instance_id: host_id.to_string(),
                     if_match: None,
                     preserve_boot_volume: Some(false),
                     preserve_data_volumes_created_at_launch: Some(false),
@@ -212,38 +161,25 @@ impl HostInfra for OciHostInfra {
         })
     }
 
-    fn launch_instances<'a>(
+    fn launch_instance<'a>(
         &'a self,
-        count: usize,
     ) -> Pin<Box<dyn Future<Output = color_eyre::Result<()>> + 'a + Send>> {
         Box::pin(async move {
-            futures::stream::iter(0..count)
-                .map(|_| async move {
-                    self.compute
-                        .launch_instance_configuration(LaunchInstanceConfigurationRequest {
-                            instance_configuration_id: self.instance_configuration_id.clone(),
-                            instance_configuration: InstanceConfigurationInstanceDetails::Compute(
-                                ComputeInstanceDetails {
-                                    launch_details: Some(
-                                        InstanceConfigurationLaunchInstanceDetails {
-                                            availability_domain: Some(
-                                                self.availability_domain.clone(),
-                                            ),
-                                            compartment_id: Some(self.compartment_id.clone()),
-                                            ..Default::default()
-                                        },
-                                    ),
-                                    ..Default::default()
-                                },
-                            ),
-                            opc_retry_token: None,
-                        })
-                        .await?;
-
-                    color_eyre::eyre::Ok(())
+            self.compute
+                .launch_instance_configuration(LaunchInstanceConfigurationRequest {
+                    instance_configuration_id: self.instance_configuration_id.clone(),
+                    instance_configuration: InstanceConfigurationInstanceDetails::Compute(
+                        ComputeInstanceDetails {
+                            launch_details: Some(InstanceConfigurationLaunchInstanceDetails {
+                                availability_domain: Some(self.availability_domain.clone()),
+                                compartment_id: Some(self.compartment_id.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ),
+                    opc_retry_token: None,
                 })
-                .buffer_unordered(4)
-                .try_collect::<Vec<()>>()
                 .await?;
 
             Ok(())
