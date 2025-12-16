@@ -1359,6 +1359,8 @@ dependencies = [
 [[package]]
 name = "oci-rust-sdk"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "471554e88cc34e4142eaed45b59374071670cbe18578670ecb511bb9c635e44a"
 dependencies = [
  "anyhow",
  "base64",

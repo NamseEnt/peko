@@ -33,16 +33,17 @@ const ociHeadQuarterVcn = new fn0.OciHeadQuarterVcn("ociHeadQuarterVcn", {
   region: config.require("OCI_HEAD_QUARTER_REGION"),
 });
 
-// const ociComputeWorker = new fn0.OciComputeWorker("ociComputeWorker", {
-//   region: config.require("OCI_COMPUTE_WORKER_REGION"),
-//   hqIpv6CidrBlocks: ociHeadQuarterVcn.ipv6cidrBlocks,
-// });
+const ociComputeWorker = new fn0.OciComputeWorker("ociComputeWorker", {
+  region: config.require("OCI_COMPUTE_WORKER_REGION"),
+  hqIpv6CidrBlocks: ociHeadQuarterVcn.ipv6cidrBlocks,
+});
 
 const ociHeadQuarter = new fn0.OciHeadQuarter("ociHeadQuarter", {
   region: config.require("OCI_HEAD_QUARTER_REGION"),
   compartmentId: ociHeadQuarterVcn.compartmentId,
   vcnId: ociHeadQuarterVcn.vcnId,
   ipv6cidrBlocks: ociHeadQuarterVcn.ipv6cidrBlocks,
+  ociWorkerInfraEnvs: ociComputeWorker.infraEnvs,
 });
 
 // const awsWatchdog = new fn0.AwsWatchdog("awsWatchdog", {

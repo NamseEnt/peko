@@ -24,27 +24,27 @@ fn main() -> Result<()> {
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
-            let host_infra = Arc::new(host_infra::oci::OciHostInfra::new());
-            let host_info_map = Arc::new(DashMap::new());
-            let health_check_map = Arc::new(DashMap::new());
+            // let host_infra = Arc::new(host_infra::oci::OciHostInfra::new());
+            // let host_info_map = Arc::new(DashMap::new());
+            // let health_check_map = Arc::new(DashMap::new());
 
             tokio::try_join!(
                 web_server(),
-                host_infra::run_sync_host_info_map(host_infra.clone(), host_info_map.clone()),
-                health_checker::run(host_info_map.clone(), health_check_map.clone()),
-                reaper::run(
-                    host_infra.clone(),
-                    host_info_map.clone(),
-                    health_check_map.clone()
-                ),
-                dns::sync_ips(health_check_map.clone()),
+                // host_infra::run_sync_host_info_map(host_infra.clone(), host_info_map.clone()),
+                // health_checker::run(host_info_map.clone(), health_check_map.clone()),
+                // reaper::run(
+                //     host_infra.clone(),
+                //     host_info_map.clone(),
+                //     health_check_map.clone()
+                // ),
+                // dns::sync_ips(health_check_map.clone()),
             )
         })?;
     Ok(())
 }
 
 async fn web_server() -> Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     let listener = TcpListener::bind(addr).await?;
 
     loop {

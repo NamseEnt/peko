@@ -5,12 +5,14 @@ import * as command from "@pulumi/command";
 import * as k8s from "@pulumi/kubernetes";
 import * as docker from "@pulumi/docker";
 import * as yaml from "js-yaml";
+import { OciWorkerInfraEnvs } from "./OciComputeWorker";
 
 export interface OciHeadQuarterArgs {
   region: pulumi.Input<string>;
   compartmentId: pulumi.Input<string>;
   vcnId: pulumi.Input<string>;
   ipv6cidrBlocks: pulumi.Input<string[]>;
+  ociWorkerInfraEnvs: pulumi.Input<OciWorkerInfraEnvs>;
 }
 
 export class OciHeadQuarter extends pulumi.ComponentResource {
@@ -21,7 +23,7 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
   ) {
     super("pkg:index:oci-head-quarter", name, args, opts);
 
-    const { region, compartmentId, vcnId } = args;
+    const { region, compartmentId, vcnId, ociWorkerInfraEnvs } = args;
 
     const nameSuffix8 = new random.RandomString(
       "name-suffix-8",
@@ -149,7 +151,7 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
         vcnId,
         name: pulumi.interpolate`fn0-${nameSuffix8}`,
       },
-      { parent: this }
+      { parent: this, deleteBeforeReplace: true }
     );
 
     const poolOptions = pulumi
@@ -201,85 +203,96 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
 
     const { hqImage } = deployDocker(this);
 
-    // const config = new pulumi.Config("oci");
-    // const tenancyOcid = config.require("tenancyOcid");
-    // const userOcid = config.require("userOcid");
-    // const fingerprint = config.require("fingerprint");
-    // const privateKey = config.require("privateKey");
+    const config = new pulumi.Config("oci");
+    const tenancyOcid = config.require("tenancyOcid");
+    const userOcid = config.require("userOcid");
+    const fingerprint = config.require("fingerprint");
+    const privateKey = config.require("privateKey");
 
-    // const kubeconfig = pulumi
-    //   .all([cluster.id, region])
-    //   .apply(([clusterId, region]) =>
-    //     oci.containerengine
-    //       .getClusterKubeConfig({
-    //         clusterId,
-    //       })
-    //       .then((kc) => {
-    //         const content = yaml.load(kc.content) as {
-    //           users: {
-    //             exec: {
-    //               env: { name: string; value: string }[];
-    //             };
-    //           }[];
-    //         };
-    //         pulumi.log.info("after load");
-    //         const { env } = content.users[0].exec;
-    //         env.push(
-    //           { name: "OCI_CLI_AUTH", value: "api_key" },
-    //           { name: "OCI_CLI_REGION", value: region },
-    //           { name: "OCI_CLI_USER", value: userOcid },
-    //           { name: "OCI_CLI_TENANCY", value: tenancyOcid },
-    //           { name: "OCI_CLI_FINGERPRINT", value: fingerprint },
-    //           { name: "OCI_CLI_KEY_CONTENT", value: privateKey }
-    //         );
-    //         const result = yaml.dump(content);
-    //         return result;
-    //       })
-    //   );
+    const kubeconfig = pulumi
+      .all([cluster.id, region])
+      .apply(([clusterId, region]) =>
+        oci.containerengine
+          .getClusterKubeConfig({
+            clusterId,
+          })
+          .then((kc) => {
+            const content = yaml.load(kc.content) as {
+              users: {
+                user: {
+                  exec: {
+                    env: { name: string; value: string }[];
+                  };
+                };
+              }[];
+            };
+            const { env } = content.users[0].user.exec;
+            env.push(
+              { name: "OCI_CLI_AUTH", value: "api_key" },
+              { name: "OCI_CLI_REGION", value: region },
+              { name: "OCI_CLI_USER", value: userOcid },
+              { name: "OCI_CLI_TENANCY", value: tenancyOcid },
+              { name: "OCI_CLI_FINGERPRINT", value: fingerprint },
+              { name: "OCI_CLI_KEY_CONTENT", value: privateKey }
+            );
+            const result = yaml.dump(content);
+            return result;
+          })
+      );
 
-    // const k8sProvider = new k8s.Provider(
-    //   "oke-k8s-provider",
-    //   {
-    //     kubeconfig,
-    //   },
-    //   { parent: this, dependsOn: [nodePool] }
-    // );
+    const k8sProvider = new k8s.Provider(
+      "oke-k8s-provider",
+      {
+        kubeconfig,
+      },
+      { parent: this, dependsOn: [nodePool] }
+    );
 
-    // const appLabels = { app: "hq" };
+    const appLabels = { app: "hq" };
 
-    // const deployment = new k8s.apps.v1.Deployment(
-    //   "hq-deployment",
-    //   {
-    //     metadata: { labels: appLabels },
-    //     spec: {
-    //       replicas: 1,
-    //       selector: { matchLabels: appLabels },
-    //       template: {
-    //         metadata: { labels: appLabels },
-    //         spec: {
-    //           containers: [
-    //             {
-    //               name: appLabels.app,
-    //               image: hqImage.imageName,
-    //               ports: [{ containerPort: 80 }],
-    //               livenessProbe: {
-    //                 httpGet: {
-    //                   path: "/health",
-    //                   port: 80,
-    //                 },
-    //                 initialDelaySeconds: 15,
-    //                 periodSeconds: 5,
-    //                 timeoutSeconds: 5,
-    //                 failureThreshold: 3,
-    //               },
-    //             },
-    //           ],
-    //         },
-    //       },
-    //     },
-    //   },
-    //   { provider: k8sProvider, parent: this }
-    // );
+    const deployment = new k8s.apps.v1.Deployment(
+      "hq-deployment",
+      {
+        metadata: { labels: appLabels },
+        spec: {
+          replicas: 1,
+          selector: { matchLabels: appLabels },
+          template: {
+            metadata: { labels: appLabels },
+            spec: {
+              containers: [
+                {
+                  name: appLabels.app,
+                  image: hqImage.imageName,
+                  ports: [{ containerPort: 8080 }],
+                  livenessProbe: {
+                    httpGet: {
+                      path: "/health",
+                      port: 8080,
+                    },
+                    initialDelaySeconds: 15,
+                    periodSeconds: 5,
+                    timeoutSeconds: 5,
+                    failureThreshold: 3,
+                  },
+                  env: pulumi
+                    .all([ociWorkerInfraEnvs])
+                    .apply(([ociWorkerInfraEnvs]) =>
+                      Object.entries(ociWorkerInfraEnvs).map(
+                        ([name, value]) => ({
+                          name,
+                          value,
+                        })
+                      )
+                    ),
+                },
+              ],
+            },
+          },
+        },
+      },
+      { provider: k8sProvider, parent: this }
+    );
 
     function deployDocker(parent: pulumi.Resource) {
       const repo = new oci.artifacts.ContainerRepository(
@@ -287,7 +300,7 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
         {
           compartmentId,
           displayName: pulumi.interpolate`hq-repo-${nameSuffix8}`,
-          isPublic: false,
+          isPublic: true,
         },
         { parent, retainOnDelete: false }
       );
