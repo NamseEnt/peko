@@ -6,7 +6,6 @@ import * as grafana from "@pulumiverse/grafana";
 export function hqGrafana(
   parent: pulumi.Resource,
   {
-    regionSlug,
     slug,
     k8sProvider,
     suffix,
@@ -25,8 +24,7 @@ export function hqGrafana(
 
   const config = new pulumi.Config("grafana");
   const password = config.require("cloudAccessPolicyToken");
-
-  const releaseName = "grafana-k8s-monitoring";
+  const releaseName = pulumi.interpolate`grafana-k8s-monitoring-${suffix}`;
 
   new k8s.helm.v3.Release(
     "grafana-k8s-monitoring",
@@ -94,7 +92,7 @@ export function hqGrafana(
                 defaultClusterId: stack.clusterSlug,
               },
               prometheus: {
-                existingSecretName: `grafana-cloud-metrics-grafana-k8s-monitoring`,
+                existingSecretName: pulumi.interpolate`grafana-cloud-metrics-${releaseName}`,
                 external: {
                   url: stack.prometheusUrl,
                 },
