@@ -1,6 +1,6 @@
 use oci_rust_sdk::{
     compute::{self, LifecycleState, ListInstancesRequest, ListInstancesRequestRequiredFields, SortBy, SortOrder},
-    core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig},
+    core::{auth::ConfigFileAuthProvider, region::Region, ClientConfig, RetryConfig},
 };
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_provider: auth,
         region: Region::ApSeoul1,
         timeout: Duration::from_secs(30),
+        retry: RetryConfig::no_retry(),
     })?;
 
     // IMPORTANT: Replace this with your actual compartment OCID

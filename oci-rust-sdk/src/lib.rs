@@ -1,5 +1,7 @@
 #[cfg(feature = "compute")]
 pub mod compute;
+#[cfg(feature = "container_instances")]
+pub mod container_instances;
 pub mod core;
 #[cfg(feature = "os_management_hub")]
 pub mod os_management_hub;

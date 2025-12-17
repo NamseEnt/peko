@@ -1,13 +1,16 @@
 [package]
 name = "oci-rust-sdk"
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-authors = ["OCI Rust SDK Contributors"]
+version = "0.2.0"
+edition = "2024"
+description = "Unofficial Oracle OCI SDK for Rust"
+authors = ["namse"]
+license = "AGPL-3.0"
+repository = "https://github.com/namseent/fn0/oci-rust-sdk"
 
 [features]
 default = []
 compute = []
+container_instances = []
 os_management_hub = []
 resource_search = []
 virtual_network = []
@@ -42,12 +45,19 @@ tokio = { version = "1", features = ["test-util"] }
 mockito = "1"
 
 [[example]]
+name = "launch_instance_configuration"
+required-features = ["compute"]
+
+[[example]]
 name = "list_instances"
 required-features = ["compute"]
 
 [[example]]
 name = "list_public_ips"
 required-features = ["virtual_network"]
+
+[[example]]
+name = "simple_auth"
 
 [[example]]
 name = "resource_search"
@@ -60,3 +70,15 @@ required-features = ["compute"]
 [[example]]
 name = "using_traits"
 required-features = ["os_management_hub"]
+
+[[example]]
+name = "list_container_instances"
+required-features = ["container_instances"]
+
+[[example]]
+name = "container_instance_lifecycle"
+required-features = ["container_instances"]
+
+[[example]]
+name = "simple_container_instance"
+required-features = ["container_instances"]
