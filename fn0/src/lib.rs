@@ -1,8 +1,6 @@
 mod execute;
-mod metrics;
 mod tcp_listener;
-
-use crate::metrics::Metrics;
+mod telemetry;
 use bytes::Bytes;
 use execute::Job;
 use http_body_util::BodyExt;
@@ -17,6 +15,7 @@ use wasmtime_wasi_http::{bindings::http::types::ErrorCode, body::HyperOutgoingBo
 pub struct Config {
     pub port: Option<u16>,
     pub wasm_path: Option<PathBuf>,
+    pub otlp_endpoint: Option<String>,
 }
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
@@ -50,19 +49,23 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     };
 
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(10 * 1024);
-    let metrics_tx = metrics::MetricsTx::new();
+
+    // Setup telemetry
+    let telemetry_providers = telemetry::setup_telemetry(config.otlp_endpoint)?;
 
     tokio::spawn({
-        let metrics_tx = metrics_tx.clone();
         async move {
-            execute::Executor::new(proxy_cache, job_rx, metrics_tx.clone(), SystemClock, false)
+            execute::Executor::new(proxy_cache, job_rx, SystemClock, false)
                 .run()
                 .await;
         }
     });
 
-    loop {
-        let (stream, _) = listener.accept().await?;
+    let result = loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => break Err(e.into()),
+        };
 
         let tower_service = ServiceBuilder::new()
             .layer(TimeoutLayer::with_status_code(
@@ -71,17 +74,15 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             ))
             .service(tower::util::service_fn({
                 let code_id_parser = code_id_parser.clone();
-                let metrics_tx = metrics_tx.clone();
                 let job_tx = job_tx.clone();
 
                 move |req: Request<hyper::body::Incoming>| {
                     let code_id_parser = code_id_parser.clone();
-                    let metrics_tx = metrics_tx.clone();
                     let job_tx = job_tx.clone();
 
                     async move {
                         let Some(code_id) = code_id_parser.parse(&req) else {
-                            metrics_tx.send(Metrics::CodeIdParseError);
+                            telemetry::code_id_parse_error();
                             return internal_error();
                         };
 
@@ -94,7 +95,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                             })
                             .await
                         else {
-                            metrics_tx.send(Metrics::OneshotDropBeforeResponse { code_id });
+                            telemetry::oneshot_drop_before_response(&code_id);
                             return internal_error();
                         };
 
@@ -117,7 +118,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                 eprintln!("Error serving connection: {:?}", err);
             }
         });
-    }
+    };
+
+    telemetry::shutdown_telemetry(telemetry_providers)?;
+    result
 }
 
 fn internal_error()
