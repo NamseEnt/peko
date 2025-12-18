@@ -41,13 +41,10 @@ pub async fn run(
             }
         }
 
-        telemetry::ReaperTerminateCandidates {
-            count: terminate_set.len() as f64,
-        }
-        .send();
+        telemetry::send_reaper_terminate_candidates(terminate_set.len());
 
         for host_id in terminate_set.clone() {
-            telemetry::ReaperTerminateAttempts.send();
+            telemetry::send_reaper_terminate_attempts();
             let host_provider = host_provider.clone();
             let span = tracing::info_span!("reaper_terminate_host", host_id = %host_id);
 

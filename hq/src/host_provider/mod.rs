@@ -24,11 +24,14 @@ pub async fn run_sync_host_info_map(
         interval.tick().await;
         info!("sync host info tick");
 
-        if let Err(err) = host_provider.sync_host_info_map(host_info_map.clone()).await {
+        if let Err(err) = host_provider
+            .sync_host_info_map(host_info_map.clone())
+            .await
+        {
             error!(%err, "Failed to sync host info map");
-            telemetry::SyncHostInfoStatus { success: false }.send();
+            telemetry::send_sync_host_info_status(false);
         } else {
-            telemetry::SyncHostInfoStatus { success: true }.send();
+            telemetry::send_sync_host_info_status(true);
         }
     }
 }

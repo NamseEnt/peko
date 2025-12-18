@@ -41,15 +41,13 @@ pub async fn sync_ips(health_check_map: HealthCheckMap) -> Result<()> {
             })
             .collect();
 
-        telemetry::DnsHealthyIps {
-            count: ips.len() as f64,
-        }.send();
+        telemetry::send_dns_healthy_ips(ips.len());
 
         if let Err(err) = dns.sync_ips(ips).await {
             error!(%err, "Failed to sync ips");
-            telemetry::DnsSyncStatus { success: false }.send();
+            telemetry::send_dns_sync_status(false);
         } else {
-            telemetry::DnsSyncStatus { success: true }.send();
+            telemetry::send_dns_sync_status(true);
         }
     }
 }
