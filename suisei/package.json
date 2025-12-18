@@ -1,0 +1,32 @@
+{
+  "name": "suisei",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Astro adapter for fn0 WASM runtime",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./server-entry": "./dist/server-entry.js",
+    "./server/hono-app": "./dist/server/hono-app.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "hono": "^4.7.11",
+    "@bytecodealliance/jco": "^1.7.3",
+    "@bytecodealliance/jco-std": "^0.1.0",
+    "@bytecodealliance/componentize-js": "^0.19.3",
+    "rolldown": "^1.0.0-beta.55"
+  },
+  "peerDependencies": {
+    "astro": "^5.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.4",
+    "typescript": "^5.7.3",
+    "astro": "^5.16.6"
+  }
+}
