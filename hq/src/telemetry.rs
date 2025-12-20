@@ -1,9 +1,9 @@
 use color_eyre::eyre::Result;
-use opentelemetry::{KeyValue, global, trace::TracerProvider};
+use opentelemetry::{global, trace::TracerProvider, KeyValue};
 use opentelemetry_otlp::{Protocol, WithExportConfig};
-use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
 use std::env;
 use std::time::Duration;
 use tracing::info;
@@ -29,7 +29,7 @@ pub fn setup_otlp() -> Result<(SdkTracerProvider, SdkMeterProvider)> {
     let tracer = tracer_provider.tracer("hq-tracer");
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_opentelemetry::layer().with_tracer(tracer)) // Grafana 전송용
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
 
     let metric_exporter = opentelemetry_otlp::MetricExporter::builder()
