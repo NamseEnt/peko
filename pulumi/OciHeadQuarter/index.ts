@@ -1,21 +1,23 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as random from "@pulumi/random";
-import { OciWorkerInfraEnvs } from "../OciComputeWorker";
 import { hqGrafana } from "./grafana";
 import { createNetworking } from "./networking";
 import { createOkeCluster } from "./oke-cluster";
 import { createDockerRegistry } from "./docker-registry";
-import { deployHqApplication } from "./hq-deployment";
 import { deployK8sDashboard } from "./k8s-dashboard";
+import { deployHqApplication } from "./hq-deployment";
+import { SiteArgs } from "../hqArgs.schema";
 
 export interface OciHeadQuarterArgs {
-  region: pulumi.Input<string>;
+  ociRegion: pulumi.Input<string>;
   compartmentId: pulumi.Input<string>;
   vcnId: pulumi.Input<string>;
   ipv6cidrBlocks: pulumi.Input<string[]>;
-  ociWorkerInfraEnvs: pulumi.Input<OciWorkerInfraEnvs>;
   grafanaRegion: pulumi.Input<string>;
   grafanaSlug: pulumi.Input<string>;
+  docDbUrl: pulumi.Input<string>;
+  docDbToken: pulumi.Input<string>;
+  sites: pulumi.Input<SiteArgs[]>;
 }
 
 export class OciHeadQuarter extends pulumi.ComponentResource {
@@ -25,11 +27,10 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
     args: OciHeadQuarterArgs,
     opts: pulumi.ComponentResourceOptions
   ) {
-    const resourceInputs = { ...args };
-    delete (resourceInputs as any).ociWorkerInfraEnvs;
-    super("pkg:index:oci-head-quarter", name, resourceInputs, opts);
+    super("pkg:index:oci-head-quarter", name, args, opts);
 
-    const { region, compartmentId, vcnId, ociWorkerInfraEnvs } = args;
+    const { ociRegion, compartmentId, vcnId, docDbUrl, docDbToken, sites } =
+      args;
 
     const nameSuffix8 = new random.RandomString(
       "name-suffix-8",
@@ -58,7 +59,7 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
       vcnId,
       regionalSubnetId: regionalSubnet.id,
       nameSuffix: nameSuffix8,
-      region,
+      region: ociRegion,
       tenancyOcid,
       userOcid,
       fingerprint,
@@ -81,14 +82,20 @@ export class OciHeadQuarter extends pulumi.ComponentResource {
     const { hqImage } = createDockerRegistry(this, {
       compartmentId,
       nameSuffix: nameSuffix8,
-      region,
+      region: ociRegion,
     });
 
     deployHqApplication(this, {
       k8sProvider,
       hqImage,
-      ociWorkerInfraEnvs,
       otlpEndpoint,
+      hqArgs: {
+        sites,
+        deploymentDb: {
+          url: docDbUrl,
+          token: docDbToken,
+        },
+      },
     });
   }
 }
