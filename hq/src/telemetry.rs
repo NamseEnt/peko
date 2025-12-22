@@ -192,3 +192,56 @@ pub fn send_dead_hosts(count: usize) {
     let gauge = global::meter("hq").f64_gauge("dead_hosts").build();
     gauge.record(count as f64, &[]);
 }
+
+pub fn send_deployment_db_sync_status(success: bool) {
+    let counter = global::meter("hq")
+        .u64_counter("deployment_db_sync_status")
+        .build();
+    counter.add(
+        1,
+        &[KeyValue::new(
+            "result",
+            if success { "success" } else { "failure" },
+        )],
+    );
+}
+
+pub fn send_deployment_db_cached_count(count: usize) {
+    let gauge = global::meter("hq")
+        .f64_gauge("deployment_db_cached_count")
+        .build();
+    gauge.record(count as f64, &[]);
+}
+
+pub fn send_deployment_db_new_loaded(count: usize) {
+    let counter = global::meter("hq")
+        .u64_counter("deployment_db_new_loaded")
+        .build();
+    counter.add(count as u64, &[]);
+}
+
+pub fn send_deployment_db_connect_status(success: bool) {
+    let counter = global::meter("hq")
+        .u64_counter("deployment_db_connect_status")
+        .build();
+    counter.add(
+        1,
+        &[KeyValue::new(
+            "result",
+            if success { "success" } else { "failure" },
+        )],
+    );
+}
+
+pub fn send_deployment_db_fetch_status(success: bool) {
+    let counter = global::meter("hq")
+        .u64_counter("deployment_db_fetch_status")
+        .build();
+    counter.add(
+        1,
+        &[KeyValue::new(
+            "result",
+            if success { "success" } else { "failure" },
+        )],
+    );
+}

@@ -16,7 +16,6 @@ reqwest = { version = "0.12.24", default-features = false, features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "sqlite"] }
 hyper = { version = "1", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -42,6 +41,7 @@ rustls = "0.23.35"
 bytes = "1.11.0"
 singleflight = "0.3.0"
 boxcar = "0.2.14"
+libsql = "0.9.29"
 
 [dev-dependencies]
 wiremock = "0.6"

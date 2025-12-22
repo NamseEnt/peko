@@ -1,20 +1,29 @@
+use bytes::Buf;
 use color_eyre::eyre::Result;
-use futures::TryStreamExt;
+use libsql::{Builder, Database, Row};
 use std::{sync::Arc, time::Duration};
 use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
+use crate::telemetry;
+
 #[derive(Clone)]
 pub struct DeploymentDb {
     cache: Arc<boxcar::Vec<Deployment>>,
-    pool: sqlx::SqlitePool,
+    db: Arc<Database>,
 }
 
+const PK: &str = "deployments";
+
 impl DeploymentDb {
-    pub async fn new(url: &str) -> Result<Self> {
-        let pool = sqlx::SqlitePool::connect(url).await?;
-        let cache = Arc::new(load_all(&pool).await?);
-        Ok(Self { cache, pool })
+    pub async fn new(url: String, token: String) -> Result<Self> {
+        let db = Builder::new_remote(url, token).build().await?;
+        let cache = Arc::new(load_all(&db).await?);
+        telemetry::send_deployment_db_cached_count(cache.count());
+        Ok(Self {
+            cache,
+            db: Arc::new(db),
+        })
     }
 
     pub async fn run_sync(&self) {
@@ -24,28 +33,68 @@ impl DeploymentDb {
         loop {
             interval.tick().await;
 
-            let mut stream = sqlx::query_as::<_, DeploymentRow>(
-                "SELECT * FROM deployments WHERE id > ? ORDER BY id ASC",
-            )
-            .bind(self.cache.count() as i64)
-            .fetch(&self.pool);
+            let conn = match self.db.connect() {
+                Ok(conn) => {
+                    telemetry::send_deployment_db_connect_status(true);
+                    conn
+                }
+                Err(err) => {
+                    warn!(%err, "Failed to connect to libsql");
+                    telemetry::send_deployment_db_connect_status(false);
+                    continue;
+                }
+            };
+
+            let sk = self.cache.count() as i64;
+
+            let mut rows = match conn
+                .query(
+                    "SELECT value FROM docs WHERE pk = ? AND sk > ? ORDER BY sk ASC",
+                    libsql::params!(PK, sk),
+                )
+                .await
+            {
+                Ok(stream) => {
+                    telemetry::send_deployment_db_fetch_status(true);
+                    stream
+                }
+                Err(err) => {
+                    warn!(%err, "Failed to fetch deployments");
+                    telemetry::send_deployment_db_fetch_status(false);
+                    telemetry::send_deployment_db_sync_status(false);
+                    break;
+                }
+            };
+
+            let mut new_count = 0;
+            let mut had_error = false;
 
             loop {
-                match stream.try_next().await {
-                    Ok(Some(deployment)) => {
-                        assert_eq!(deployment.id, self.cache.count() as u64);
-
-                        self.cache.push(Deployment {
-                            code_id: deployment.code_id,
-                            code_version: deployment.code_version,
-                        });
+                match rows.next().await {
+                    Ok(Some(row)) => {
+                        self.cache.push(row_to_deployment(row));
+                        new_count += 1;
                     }
                     Ok(None) => break,
                     Err(err) => {
                         warn!(%err, "Failed to fetch deployments");
+                        telemetry::send_deployment_db_fetch_status(false);
+                        had_error = true;
                         break;
                     }
                 }
+            }
+
+            if new_count > 0 {
+                telemetry::send_deployment_db_new_loaded(new_count);
+            }
+
+            telemetry::send_deployment_db_cached_count(self.cache.count());
+
+            if !had_error {
+                telemetry::send_deployment_db_sync_status(true);
+            } else {
+                telemetry::send_deployment_db_sync_status(false);
             }
         }
     }
@@ -64,24 +113,29 @@ impl DeploymentDb {
     }
 }
 
-#[derive(sqlx::FromRow, serde::Deserialize)]
-struct DeploymentRow {
-    id: u64,
-    code_id: u64,
-    code_version: u64,
+fn row_to_deployment(row: Row) -> Deployment {
+    let bytes: [u8; 16] = row.get(0).unwrap();
+    let mut cursor = bytes.as_slice();
+
+    Deployment {
+        code_id: cursor.get_u64(),
+        code_version: cursor.get_u64(),
+    }
 }
 
-async fn load_all(pool: &sqlx::SqlitePool) -> Result<boxcar::Vec<Deployment>> {
+async fn load_all(db: &Database) -> Result<boxcar::Vec<Deployment>> {
     let mut out = Vec::new();
 
-    let mut stream =
-        sqlx::query_as::<_, DeploymentRow>("SELECT * FROM deployments ORDER BY id ASC").fetch(pool);
+    let mut rows = db
+        .connect()?
+        .query(
+            "SELECT value FROM docs WHERE pk = ? ORDER BY sk ASC",
+            libsql::params!(PK),
+        )
+        .await?;
 
-    while let Some(deployment) = stream.try_next().await? {
-        out.push(Deployment {
-            code_id: deployment.code_id,
-            code_version: deployment.code_version,
-        });
+    while let Some(row) = rows.next().await? {
+        out.push(row_to_deployment(row));
     }
 
     Ok(boxcar::Vec::from_iter(out))
