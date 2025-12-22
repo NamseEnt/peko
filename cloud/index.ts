@@ -29,6 +29,11 @@ const apiTokenPermissionGroups = Promise.all([
 //   ],
 // });
 
+const docDb = new fn0.TursoDocDb("docDb", {
+  organizationSlug: config.require("tursoOrganizationSlug"),
+  location: config.require("tursoLocation"),
+});
+
 const ociHeadQuarterVcn = new fn0.OciHeadQuarterVcn("ociHeadQuarterVcn", {
   region: config.require("ociHeadQuarterRegion"),
 });
@@ -39,13 +44,15 @@ const ociComputeWorker = new fn0.OciComputeWorker("ociComputeWorker", {
 });
 
 const ociHeadQuarter = new fn0.OciHeadQuarter("ociHeadQuarter", {
-  region: config.require("ociHeadQuarterRegion"),
+  ociRegion: config.require("ociHeadQuarterRegion"),
   compartmentId: ociHeadQuarterVcn.compartmentId,
   vcnId: ociHeadQuarterVcn.vcnId,
   ipv6cidrBlocks: ociHeadQuarterVcn.ipv6cidrBlocks,
-  ociWorkerInfraEnvs: ociComputeWorker.infraEnvs,
   grafanaSlug: config.require("grafanaSlug"),
   grafanaRegion: config.require("grafanaRegion"),
+  docDbUrl: docDb.url,
+  docDbToken: docDb.token,
+  sites: [],
 });
 
 export const kubeconfig = pulumi.secret(ociHeadQuarter.kubeconfig);

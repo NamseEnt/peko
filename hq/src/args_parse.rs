@@ -15,8 +15,7 @@ pub struct HqArgsParsed {
 
 impl HqArgs {
     pub async fn parse() -> Result<HqArgsParsed> {
-        let path = std::env::var("HOST_PROVIDER_CONFIG_PATH")
-            .unwrap_or_else(|_| "host-provider.json".to_string());
+        let path = std::env::var("HQ_ARGS_PATH").unwrap_or_else(|_| "hq-args.json".to_string());
 
         let content = std::fs::read_to_string(&path)
             .map_err(|e| eyre!("Failed to read config file at {}: {}", path, e))?;
@@ -24,7 +23,8 @@ impl HqArgs {
         let args: HqArgs = serde_json::from_str(&content)
             .map_err(|e| eyre!("Failed to parse config file: {}", e))?;
 
-        let deployment_db = DeploymentDb::new(&args.deployment_db.url).await?;
+        let deployment_db =
+            DeploymentDb::new(args.deployment_db.url, args.deployment_db.token).await?;
 
         let sites = args
             .sites

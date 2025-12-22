@@ -6,6 +6,8 @@ config:
   fn0Cloud:ociHeadQuarterRegion: ap-osaka-1
   fn0Cloud:grafanaSlug: fn0
   fn0Cloud:grafanaRegion: prod-ap-northeast-0
+  fn0Cloud:tursoOrganizationSlug: fn0
+  fn0Cloud:tursoLocation: aws-ap-northeast-1
   cloudflare:apiToken:
     secure: AAABAB1686F4p2c0ekGSwwRhT+FLjUIUrQQ/SxRnP6IiMUcEg63QmtP4/DJp0JSpHIjqrRJ26tt56ZHB2fize1fjUH3hBGze
   aws:region: ap-northeast-1
