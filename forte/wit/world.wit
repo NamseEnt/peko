@@ -1,0 +1,5 @@
+package forte:runtime;
+
+world forte-proxy {
+    include wasi:http/proxy@0.2.0;
+}
