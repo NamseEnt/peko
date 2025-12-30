@@ -274,6 +274,23 @@ impl<'tcx> TypeConverter<'tcx> {
     }
 }
 
+fn get_module_actual_span<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> rustc_span::Span {
+    if let Some(local_def_id) = def_id.as_local() {
+        let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
+        if let rustc_hir::Node::Item(item) = tcx.hir_node(hir_id) {
+            if let rustc_hir::ItemKind::Mod(_, mod_ref) = &item.kind {
+                if let Some(first_item_id) = mod_ref.item_ids.first() {
+                    let first_item_hir_id = first_item_id.hir_id();
+                    if let rustc_hir::Node::Item(first_item) = tcx.hir_node(first_item_hir_id) {
+                        return first_item.span;
+                    }
+                }
+            }
+        }
+    }
+    tcx.def_span(def_id)
+}
+
 struct Analyzer;
 
 impl Callbacks for Analyzer {
@@ -284,15 +301,22 @@ impl Callbacks for Analyzer {
             let owner_id = item_id.owner_id;
             let def_id: DefId = owner_id.to_def_id();
             if tcx.def_kind(def_id) == DefKind::Mod {
-                let span = tcx.def_span(def_id);
+                let span = get_module_actual_span(tcx, def_id);
                 let source_map = tcx.sess.source_map();
                 let filename = source_map.span_to_filename(span);
                 if let rustc_span::FileName::Real(path) = filename {
                     if let Some(local_path) = path.into_local_path() {
                         let path_str = local_path.to_string_lossy();
                         if path_str.contains("src/pages") && path_str.ends_with("mod.rs") {
-                            let mut modules = page_modules.lock().unwrap();
-                            modules.push(def_id);
+                            let path_parts: Vec<&str> = path_str.split('/').collect();
+                            let src_pages_idx = path_parts.iter().position(|&p| p == "pages");
+                            if let Some(idx) = src_pages_idx {
+                                let after_pages = &path_parts[idx + 1..path_parts.len() - 1];
+                                if after_pages.len() <= 2 {
+                                    let mut modules = page_modules.lock().unwrap();
+                                    modules.push(def_id);
+                                }
+                            }
                         }
                     }
                 }
@@ -303,7 +327,7 @@ impl Callbacks for Analyzer {
         let modules = page_modules.lock().unwrap();
         for def_id in modules.iter() {
             let def_id = *def_id;
-            let span = tcx.def_span(def_id);
+            let span = get_module_actual_span(tcx, def_id);
             let filename = source_map.span_to_filename(span);
             if let rustc_span::FileName::Real(ref path) = filename {
                 if let Some(local_path) = path.clone().into_local_path() {
@@ -315,53 +339,56 @@ impl Callbacks for Analyzer {
                 Some(id) => id,
                 None => continue,
             };
-            let local_mod_id = tcx.parent_module_from_def_id(local_def_id);
+            let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
             let filename = source_map.span_to_filename(span);
             let mut handler_found = false;
             let mut props_def_id: Option<DefId> = None;
             let mut props_kind: Option<DefKind> = None;
-            items.free_items().for_each(|item_id| {
-                let item_owner_id = item_id.owner_id;
-                let item_module = tcx.parent_module(item_owner_id.into());
-                if item_module.to_local_def_id() != local_mod_id.to_local_def_id() {
-                    return;
-                }
-                let item_def_id = item_owner_id.to_def_id();
-                let item_name_str = tcx.def_path_str(item_def_id);
-                if let Some((_, name)) = item_name_str.rsplit_once("::") {
-                    if name == "handler" {
-                        if tcx.def_kind(item_def_id) == DefKind::Fn {
-                            if matches!(tcx.visibility(item_def_id), Visibility::Public) {
-                                handler_found = true;
-                            } else {
-                                let path_str = if let rustc_span::FileName::Real(ref path) = filename {
-                                    path.clone().into_local_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| format!("{:?}", filename))
-                                } else {
-                                    format!("{:?}", filename)
-                                };
-                                eprintln!("Error: handler in {} must be public", path_str);
-                                std::process::exit(1);
+
+            if let rustc_hir::Node::Item(item) = tcx.hir_node(hir_id) {
+                if let rustc_hir::ItemKind::Mod(_, mod_ref) = &item.kind {
+                    for item_id in mod_ref.item_ids {
+                        let item_hir_id = item_id.hir_id();
+                        if let rustc_hir::Node::Item(child_item) = tcx.hir_node(item_hir_id) {
+                            let child_def_id = child_item.owner_id.to_def_id();
+                            let item_name_str = tcx.def_path_str(child_def_id);
+                            if let Some((_, name)) = item_name_str.rsplit_once("::") {
+                                if name == "handler" {
+                                    if tcx.def_kind(child_def_id) == DefKind::Fn {
+                                        if matches!(tcx.visibility(child_def_id), Visibility::Public) {
+                                            handler_found = true;
+                                        } else {
+                                            let path_str = if let rustc_span::FileName::Real(ref path) = filename {
+                                                path.clone().into_local_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| format!("{:?}", filename))
+                                            } else {
+                                                format!("{:?}", filename)
+                                            };
+                                            eprintln!("Error: handler in {} must be public", path_str);
+                                            std::process::exit(1);
+                                        }
+                                    }
+                                } else if name == "Props" {
+                                    let item_def_kind = tcx.def_kind(child_def_id);
+                                    if item_def_kind == DefKind::Struct || item_def_kind == DefKind::Enum || item_def_kind == DefKind::TyAlias {
+                                        props_def_id = Some(child_def_id);
+                                        props_kind = Some(item_def_kind);
+                                    } else {
+                                        let path_str = if let rustc_span::FileName::Real(ref path) = filename {
+                                            path.clone().into_local_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| format!("{:?}", filename))
+                                        } else {
+                                            format!("{:?}", filename)
+                                        };
+                                        eprintln!("Error: Props in {} must be a struct, enum, or type alias", path_str);
+                                        std::process::exit(1);
+                                    }
+                                }
                             }
-                        }
-                    } else if name == "Props" {
-                        let item_def_kind = tcx.def_kind(item_def_id);
-                        if item_def_kind == DefKind::Struct || item_def_kind == DefKind::Enum || item_def_kind == DefKind::TyAlias {
-                            props_def_id = Some(item_def_id);
-                            props_kind = Some(item_def_kind);
-                        } else {
-                            let path_str = if let rustc_span::FileName::Real(ref path) = filename {
-                                path.clone().into_local_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| format!("{:?}", filename))
-                            } else {
-                                format!("{:?}", filename)
-                            };
-                            eprintln!("Error: Props in {} must be a struct, enum, or type alias", path_str);
-                            std::process::exit(1);
                         }
                     }
                 }
-            });
+            }
             if !handler_found {
-                let span = tcx.def_span(def_id);
+                let span = get_module_actual_span(tcx, def_id);
                 let filename = source_map.span_to_filename(span);
                 let path_str = if let rustc_span::FileName::Real(ref path) = filename {
                     path.clone().into_local_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| format!("{:?}", filename))
@@ -378,7 +405,7 @@ impl Callbacks for Analyzer {
                     Some(DefKind::TyAlias) => "alias",
                     _ => "unknown",
                 };
-                let span = tcx.def_span(def_id);
+                let span = get_module_actual_span(tcx, def_id);
                 let filename = source_map.span_to_filename(span);
                 if let rustc_span::FileName::Real(ref path) = filename {
                     if let Some(local_path) = path.clone().into_local_path() {
@@ -415,7 +442,7 @@ impl Callbacks for Analyzer {
                 }
                 println!();
             } else {
-                let span = tcx.def_span(def_id);
+                let span = get_module_actual_span(tcx, def_id);
                 let filename = source_map.span_to_filename(span);
                 let path_str = if let rustc_span::FileName::Real(ref path) = filename {
                     path.clone().into_local_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| format!("{:?}", filename))
