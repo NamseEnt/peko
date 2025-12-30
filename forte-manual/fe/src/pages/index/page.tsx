@@ -1,3 +1,3 @@
-import Props from "./props";
+import { Props } from "./.props";
 
 export default function ({}: Props) {}
