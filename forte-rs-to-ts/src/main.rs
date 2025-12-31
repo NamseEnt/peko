@@ -39,9 +39,12 @@ struct TsField {
 
 #[derive(Debug, Clone)]
 struct TsDefinition {
-    full_path: String,        // Original: "route_generated::pages_index::UserProfile"
-    namespace: Vec<String>,   // Resolved: [] or ["utils"]
-    type_name: String,        // Resolved: "UserProfile" or "Review"
+    /// Original: "route_generated::pages_index::UserProfile"
+    full_path: String,
+    /// Resolved: [] or ["utils"]
+    namespace: Vec<String>,
+    /// Resolved: "UserProfile" or "Review"
+    type_name: String,
     ty: TsType,
 }
 
@@ -97,7 +100,6 @@ impl fmt::Display for TsType {
         }
     }
 }
-
 
 fn snake_to_camel(s: &str) -> String {
     let mut result = String::new();
@@ -257,16 +259,17 @@ impl<'tcx> TypeConverter<'tcx> {
                 let field_ty = field.ty(self.tcx, substs);
                 let field_context = format!("{}.{}", context, field_name);
 
-                let (is_optional, actual_ty) = if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = field_ty.kind() {
-                    if self.is_std_type(adt_def, "Option") {
-                        let inner_ty = substs[0].expect_ty();
-                        (true, self.convert_type(inner_ty, &field_context))
+                let (is_optional, actual_ty) =
+                    if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = field_ty.kind() {
+                        if self.is_std_type(adt_def, "Option") {
+                            let inner_ty = substs[0].expect_ty();
+                            (true, self.convert_type(inner_ty, &field_context))
+                        } else {
+                            (false, self.convert_type(field_ty, &field_context))
+                        }
                     } else {
                         (false, self.convert_type(field_ty, &field_context))
-                    }
-                } else {
-                    (false, self.convert_type(field_ty, &field_context))
-                };
+                    };
 
                 TsField {
                     name: field_name_camel,
@@ -279,8 +282,8 @@ impl<'tcx> TypeConverter<'tcx> {
         let ts_type = TsType::Object(fields.clone());
         self.definitions.push(TsDefinition {
             full_path: type_name.clone(),
-            namespace: vec![],                    // Will be resolved later
-            type_name: type_name.clone(),         // Will be resolved later
+            namespace: vec![],            // Will be resolved later
+            type_name: type_name.clone(), // Will be resolved later
             ty: ts_type.clone(),
         });
         ts_type
@@ -297,7 +300,11 @@ impl<'tcx> TypeConverter<'tcx> {
 
         for variant in adt_def.variants() {
             let variant_ty = if variant.fields.is_empty() {
-                TsType::Primitive(format!("\"{}\"", variant.name))
+                TsType::Object(vec![TsField {
+                    name: "t".to_string(),
+                    ty: TsType::Primitive(format!("\"{}\"", variant.name)),
+                    is_optional: false,
+                }])
             } else {
                 let is_tuple_variant = variant.ctor_kind() == Some(CtorKind::Fn);
                 let fields: Vec<TsField> = variant
@@ -314,16 +321,18 @@ impl<'tcx> TypeConverter<'tcx> {
                         let field_ty = field.ty(self.tcx, substs);
                         let field_context = format!("{}::{}.{}", context, variant.name, field_name);
 
-                        let (is_optional, actual_ty) = if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = field_ty.kind() {
-                            if self.is_std_type(adt_def, "Option") {
-                                let inner_ty = substs[0].expect_ty();
-                                (true, self.convert_type(inner_ty, &field_context))
+                        let (is_optional, actual_ty) =
+                            if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = field_ty.kind()
+                            {
+                                if self.is_std_type(adt_def, "Option") {
+                                    let inner_ty = substs[0].expect_ty();
+                                    (true, self.convert_type(inner_ty, &field_context))
+                                } else {
+                                    (false, self.convert_type(field_ty, &field_context))
+                                }
                             } else {
                                 (false, self.convert_type(field_ty, &field_context))
-                            }
-                        } else {
-                            (false, self.convert_type(field_ty, &field_context))
-                        };
+                            };
 
                         TsField {
                             name: field_name.clone(),
@@ -333,15 +342,25 @@ impl<'tcx> TypeConverter<'tcx> {
                     })
                     .collect();
 
-                TsType::Object(vec![TsField {
-                    name: variant.name.to_string(),
+                let tag_field = TsField {
+                    name: "t".to_string(),
+                    ty: TsType::Primitive(format!("\"{}\"", variant.name)),
+                    is_optional: false,
+                };
+
+                let value_field = TsField {
+                    name: "v".to_string(),
                     ty: if is_tuple_variant && fields.len() == 1 {
                         fields[0].ty.clone()
+                    } else if is_tuple_variant {
+                        TsType::Tuple(fields.into_iter().map(|f| f.ty).collect())
                     } else {
                         TsType::Object(fields)
                     },
                     is_optional: false,
-                }])
+                };
+
+                TsType::Object(vec![tag_field, value_field])
             };
             variants.push(variant_ty);
         }
@@ -366,7 +385,6 @@ fn get_module_actual_span<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> rustc_span:
     tcx.def_span(def_id)
 }
 
-/// Strip the route_generated::pages_<module>:: prefix from a type path
 fn strip_route_prefix(full_path: &str) -> Vec<String> {
     let parts: Vec<&str> = full_path.split("::").collect();
 
@@ -386,8 +404,10 @@ fn strip_route_prefix(full_path: &str) -> Vec<String> {
 /// Represents the resolved name for a type: namespace path + type name
 #[derive(Debug, Clone)]
 struct ResolvedName {
-    namespace: Vec<String>,  // e.g., ["utils"] or []
-    type_name: String,       // e.g., "Review"
+    /// ["utils"] or []
+    namespace: Vec<String>,
+    /// "Review"
+    type_name: String,
 }
 
 impl ResolvedName {
@@ -401,7 +421,6 @@ impl ResolvedName {
     }
 }
 
-/// Find shortest unique namespace for paths that share the same final component
 fn find_shortest_unique_namespaces(paths: &[Vec<String>]) -> Vec<ResolvedName> {
     if paths.len() == 1 {
         // No collision - no namespace needed
@@ -426,8 +445,10 @@ fn find_shortest_unique_namespaces(paths: &[Vec<String>]) -> Vec<ResolvedName> {
             // Try using suffix_len components as namespace
             let namespace_len = components.len().saturating_sub(1).min(suffix_len);
             let namespace_start = components.len().saturating_sub(1) - namespace_len;
-            let namespace: Vec<String> = components[namespace_start..components.len()-1]
-                .iter().map(|s| s.to_string()).collect();
+            let namespace: Vec<String> = components[namespace_start..components.len() - 1]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
             let resolved_name = ResolvedName {
                 namespace: namespace.clone(),
@@ -450,33 +471,45 @@ fn find_shortest_unique_namespaces(paths: &[Vec<String>]) -> Vec<ResolvedName> {
         suffix_len += 1;
 
         // Safety: if we've used all available namespace components, stop
-        if suffix_len > paths.iter().map(|p| p.len().saturating_sub(1)).max().unwrap_or(0) {
+        if suffix_len
+            > paths
+                .iter()
+                .map(|p| p.len().saturating_sub(1))
+                .max()
+                .unwrap_or(0)
+        {
             // Use full namespace path
-            return paths.iter().map(|components| {
-                let type_name = components.last().unwrap().clone();
-                let namespace = components[..components.len()-1].iter()
-                    .map(|s| s.to_string()).collect();
-                ResolvedName { namespace, type_name }
-            }).collect();
+            return paths
+                .iter()
+                .map(|components| {
+                    let type_name = components.last().unwrap().clone();
+                    let namespace = components[..components.len() - 1]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    ResolvedName {
+                        namespace,
+                        type_name,
+                    }
+                })
+                .collect();
         }
     }
 }
 
-/// Resolve all type names to their shortest unique forms
 fn resolve_type_names(definitions: &[TsDefinition]) -> HashMap<String, ResolvedName> {
-    // Group by final component
     let mut groups: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
 
     for def in definitions {
         let components = strip_route_prefix(&def.full_path);
         let final_component = components.last().unwrap().clone();
 
-        groups.entry(final_component)
-            .or_insert_with(Vec::new)
+        groups
+            .entry(final_component)
+            .or_default()
             .push((def.full_path.clone(), components));
     }
 
-    // Resolve each group
     let mut result = HashMap::new();
 
     for (_final_name, paths) in groups {
@@ -491,7 +524,6 @@ fn resolve_type_names(definitions: &[TsDefinition]) -> HashMap<String, ResolvedN
     result
 }
 
-/// Recursively update all TsType::Reference instances with resolved names
 fn apply_name_resolution_to_type(ty: &mut TsType, name_map: &HashMap<String, ResolvedName>) {
     match ty {
         TsType::Reference(name) => {
@@ -524,7 +556,6 @@ fn apply_name_resolution_to_type(ty: &mut TsType, name_map: &HashMap<String, Res
     }
 }
 
-/// Format a single type definition as TypeScript interface or type alias
 fn format_definition(def: &TsDefinition) -> String {
     if let TsType::Object(fields) = &def.ty {
         let mut result = format!("export interface {} {{\n", def.type_name);
@@ -535,9 +566,12 @@ fn format_definition(def: &TsDefinition) -> String {
             } else {
                 format!("{}", field.ty)
             };
-            result.push_str(&format!("    {}{}: {};\n", field.name, optional_marker, ty_str));
+            result.push_str(&format!(
+                "    {}{}: {};\n",
+                field.name, optional_marker, ty_str
+            ));
         }
-        result.push_str("}");
+        result.push('}');
         result
     } else {
         format!("export type {} = {};", def.type_name, def.ty)
@@ -714,10 +748,8 @@ impl Callbacks for Analyzer {
                 let context = format!("{:?}", filename);
                 let ts_type = converter.convert_type(props_ty, &context);
 
-                // Resolve all type names using shortest unique suffix with namespaces
                 let name_map = resolve_type_names(&converter.definitions);
 
-                // Apply resolved names to definitions
                 for def in &mut converter.definitions {
                     if let Some(resolved) = name_map.get(&def.full_path) {
                         def.namespace = resolved.namespace.clone();
@@ -725,16 +757,13 @@ impl Callbacks for Analyzer {
                     }
                 }
 
-                // Apply resolved names to all type references
                 for def in &mut converter.definitions {
                     apply_name_resolution_to_type(&mut def.ty, &name_map);
                 }
 
-                // Generate output with namespaces
                 let mut file_content = String::new();
                 file_content.push_str(&format!("// Auto-generated from {}\n\n", rust_source_path));
 
-                // Output Props type
                 if let TsType::Object(fields) = &ts_type {
                     file_content.push_str("export interface Props {\n");
                     for field in fields {
@@ -744,39 +773,42 @@ impl Callbacks for Analyzer {
                         } else {
                             format!("{}", field.ty)
                         };
-                        file_content.push_str(&format!("    {}{}: {};\n", field.name, optional_marker, ty_str));
+                        file_content.push_str(&format!(
+                            "    {}{}: {};\n",
+                            field.name, optional_marker, ty_str
+                        ));
                     }
                     file_content.push_str("}\n");
                 } else {
                     file_content.push_str(&format!("export type Props = {};\n", ts_type));
                 }
 
-                // Group definitions by namespace
                 let mut namespace_groups: HashMap<Vec<String>, Vec<&TsDefinition>> = HashMap::new();
                 for def in &converter.definitions {
-                    namespace_groups.entry(def.namespace.clone())
-                        .or_insert_with(Vec::new)
+                    namespace_groups
+                        .entry(def.namespace.clone())
+                        .or_default()
                         .push(def);
                 }
 
-                // Output top-level definitions (no namespace)
                 if let Some(top_level_defs) = namespace_groups.get(&vec![]) {
                     for def in top_level_defs {
-                        file_content.push_str("\n");
+                        file_content.push('\n');
                         file_content.push_str(&format_definition(def));
                     }
                 }
 
-                // Output namespaced definitions
-                let mut namespaces: Vec<Vec<String>> = namespace_groups.keys()
+                let mut namespaces: Vec<Vec<String>> = namespace_groups
+                    .keys()
                     .filter(|ns| !ns.is_empty())
                     .cloned()
                     .collect();
                 namespaces.sort();
 
                 for namespace in namespaces {
-                    file_content.push_str("\n");
-                    file_content.push_str(&format!("export namespace {} {{\n", namespace.join(".")));
+                    file_content.push('\n');
+                    file_content
+                        .push_str(&format!("export namespace {} {{\n", namespace.join(".")));
 
                     if let Some(defs) = namespace_groups.get(&namespace) {
                         for def in defs {
@@ -791,13 +823,14 @@ impl Callbacks for Analyzer {
                     file_content.push_str("}\n");
                 }
 
-                let ts_output_path = convert_rust_path_to_ts_path(&rust_source_path, &self.ts_output_dir);
+                let ts_output_path =
+                    convert_rust_path_to_ts_path(&rust_source_path, &self.ts_output_dir);
 
-                if let Some(parent) = ts_output_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        eprintln!("Error creating directory {}: {}", parent.display(), e);
-                        std::process::exit(1);
-                    }
+                if let Some(parent) = ts_output_path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    eprintln!("Error creating directory {}: {}", parent.display(), e);
+                    std::process::exit(1);
                 }
 
                 if let Err(e) = std::fs::write(&ts_output_path, &file_content) {
@@ -805,7 +838,11 @@ impl Callbacks for Analyzer {
                     std::process::exit(1);
                 }
 
-                println!("Generated: {} -> {}", rust_source_path, ts_output_path.display());
+                println!(
+                    "Generated: {} -> {}",
+                    rust_source_path,
+                    ts_output_path.display()
+                );
             } else {
                 let span = get_module_actual_span(tcx, def_id);
                 let filename = source_map.span_to_filename(span);
@@ -826,8 +863,8 @@ impl Callbacks for Analyzer {
 }
 fn main() {
     if env::var("MY_ANALYZER_WRAPPER_MODE").is_ok() {
-        let ts_output_dir = env::var("TS_OUTPUT_DIR")
-            .unwrap_or_else(|_| "../fe/src/pages".to_string());
+        let ts_output_dir =
+            env::var("TS_OUTPUT_DIR").unwrap_or_else(|_| "../fe/src/pages".to_string());
 
         let mut args: Vec<String> = env::args().collect();
 
@@ -856,15 +893,13 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "../forte-manual/rs".to_string());
 
-    let ts_output_dir = env::args()
-        .nth(2)
-        .unwrap_or_else(|| {
-            let parent = Path::new(&target_dir)
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string());
-            format!("{}/fe/src/pages", parent)
-        });
+    let ts_output_dir = env::args().nth(2).unwrap_or_else(|| {
+        let parent = Path::new(&target_dir)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        format!("{}/fe/src/pages", parent)
+    });
 
     let current_exe = env::current_exe().expect("Failed to find current exe");
     println!("Running cargo check on: {target_dir}");

@@ -1,16 +1,16 @@
 import { Props } from "./.props";
 
 export default function (props: Props) {
-  if ("NotFound" in props) {
+  if (props.t === "NotFound") {
     return (
       <div>
         <h1>Product Not Found</h1>
-        <p>{props.NotFound.message}</p>
+        <p>{props.v.message}</p>
       </div>
     );
   }
 
-  const { product, reviews, relatedIds } = props.Ok;
+  const { product, reviews, relatedIds } = props.v;
   const { stock } = product;
 
   return (
@@ -47,12 +47,12 @@ export default function (props: Props) {
 
         <div>
           <strong>Stock Status:</strong>
-          {typeof stock === "string" ? (
-            <p>{stock}</p>
-          ) : "InStock" in stock ? (
-            <p>In Stock: {stock.InStock} units</p>
+          {stock.t === "InStock" ? (
+            <p>In Stock: {stock.v} units</p>
+          ) : stock.t === "OutOfStock" ? (
+            <p>Out of Stock</p>
           ) : (
-            <p>Pre-Order - Release Date: {stock.PreOrder.releaseDate}</p>
+            <p>Pre-Order - Release Date: {stock.v.releaseDate}</p>
           )}
         </div>
 

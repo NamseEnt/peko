@@ -1,7 +1,7 @@
 import { Props } from "./.props";
 
 export default function (props: Props) {
-  const { user, banners, feed, serverTime } = props.Ok;
+  const { user, banners, feed, serverTime } = props.v;
 
   return (
     <div>
@@ -44,7 +44,7 @@ export default function (props: Props) {
                   <strong>Link:</strong> {banner.link}
                 </p>
                 <p>
-                  <strong>Variant:</strong> {banner.variant}
+                  <strong>Variant:</strong> {banner.variant.t}
                 </p>
               </li>
             ))}
