@@ -388,7 +388,6 @@ fn get_module_actual_span<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> rustc_span:
 fn strip_route_prefix(full_path: &str) -> Vec<String> {
     let parts: Vec<&str> = full_path.split("::").collect();
 
-    // Find "pages" index
     if let Some(pages_idx) = parts.iter().position(|&p| p == "pages") {
         // Skip route_generated, pages, and the page module name
         let start_idx = pages_idx + 2;
@@ -397,21 +396,16 @@ fn strip_route_prefix(full_path: &str) -> Vec<String> {
         }
     }
 
-    // Fallback: return just the last component
-    vec![parts.last().unwrap_or(&"Unknown").to_string()]
+    vec![parts.last().expect("Failed to get last part").to_string()]
 }
 
-/// Represents the resolved name for a type: namespace path + type name
 #[derive(Debug, Clone)]
 struct ResolvedName {
-    /// ["utils"] or []
     namespace: Vec<String>,
-    /// "Review"
     type_name: String,
 }
 
 impl ResolvedName {
-    /// Get the full reference name for use in types (e.g., "utils.Review" or "Review")
     fn reference(&self) -> String {
         if self.namespace.is_empty() {
             self.type_name.clone()
@@ -422,8 +416,8 @@ impl ResolvedName {
 }
 
 fn find_shortest_unique_namespaces(paths: &[Vec<String>]) -> Vec<ResolvedName> {
-    if paths.len() == 1 {
-        // No collision - no namespace needed
+    let no_collision = paths.len() == 1;
+    if no_collision {
         let type_name = paths[0].last().unwrap().clone();
         return vec![ResolvedName {
             namespace: vec![],
@@ -431,7 +425,6 @@ fn find_shortest_unique_namespaces(paths: &[Vec<String>]) -> Vec<ResolvedName> {
         }];
     }
 
-    // There's a collision, need to find shortest unique prefix
     let mut suffix_len = 1;
 
     loop {
@@ -442,7 +435,6 @@ fn find_shortest_unique_namespaces(paths: &[Vec<String>]) -> Vec<ResolvedName> {
         for components in paths.iter() {
             let type_name = components.last().unwrap().clone();
 
-            // Try using suffix_len components as namespace
             let namespace_len = components.len().saturating_sub(1).min(suffix_len);
             let namespace_start = components.len().saturating_sub(1) - namespace_len;
             let namespace: Vec<String> = components[namespace_start..components.len() - 1]
@@ -863,9 +855,6 @@ impl Callbacks for Analyzer {
 }
 fn main() {
     if env::var("MY_ANALYZER_WRAPPER_MODE").is_ok() {
-        let ts_output_dir =
-            env::var("TS_OUTPUT_DIR").unwrap_or_else(|_| "../fe/src/pages".to_string());
-
         let mut args: Vec<String> = env::args().collect();
 
         let is_build_script = args.iter().any(|arg| arg == "build_script_build");
@@ -885,7 +874,9 @@ fn main() {
         if args.len() > 1 {
             args.remove(1);
         }
-        let mut callbacks = Analyzer { ts_output_dir };
+        let mut callbacks = Analyzer {
+            ts_output_dir: "../fe/src/pages".to_string(),
+        };
         run_compiler(&args, &mut callbacks);
         return;
     }
@@ -893,24 +884,14 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "../forte-manual/rs".to_string());
 
-    let ts_output_dir = env::args().nth(2).unwrap_or_else(|| {
-        let parent = Path::new(&target_dir)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| ".".to_string());
-        format!("{}/fe/src/pages", parent)
-    });
-
     let current_exe = env::current_exe().expect("Failed to find current exe");
     println!("Running cargo check on: {target_dir}");
-    println!("Writing TypeScript to: {ts_output_dir}");
 
     let status = Command::new("cargo")
         .arg("check")
         .current_dir(&target_dir)
         .env("RUSTC_WORKSPACE_WRAPPER", current_exe)
         .env("MY_ANALYZER_WRAPPER_MODE", "true")
-        .env("TS_OUTPUT_DIR", &ts_output_dir)
         .status()
         .expect("Failed to run cargo");
 

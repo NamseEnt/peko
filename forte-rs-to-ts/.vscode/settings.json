@@ -1,8 +1,5 @@
 {
-  // rust-analyzer가 컴파일러 내부 소스(rustc_driver 등)를 찾도록 설정
   "rust-analyzer.rustc.source": "discover",
-
-  // rust-analyzer가 cargo check를 실행할 때 nightly 기능을 문제없이 쓰도록 환경변수 주입
   "rust-analyzer.cargo.extraEnv": {
     "RUSTC_BOOTSTRAP": "1"
   }
