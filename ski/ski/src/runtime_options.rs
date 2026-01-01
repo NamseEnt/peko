@@ -22,7 +22,7 @@ pub fn runtime_options() -> RuntimeOptions {
 extension!(
     bootstrap,
     esm_entry_point = "ext:bootstrap/bootstrap.js",
-    esm = ["bootstrap.js"],
+    esm = ["bootstrap.js", "run.js"],
 );
 
 #[derive(Default)]

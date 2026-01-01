@@ -34,6 +34,18 @@ impl DeploymentMap {
         }
     }
 
+    pub fn register_code(&mut self, code_id: &str, kind: CodeKind) {
+        self.code_id_deployment_id_map
+            .insert(code_id.to_string(), "default".to_string());
+        self.code_manifest_map.insert(
+            code_id.to_string(),
+            CodeManifest {
+                kind,
+                code_id: code_id.to_string(),
+            },
+        );
+    }
+
     pub fn is_code_in_same_deployment(
         &self,
         code_id_a: &CodeId,

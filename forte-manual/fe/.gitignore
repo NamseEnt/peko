@@ -1,0 +1,3 @@
+/node_modules
+/src/pages/**/.props.ts
+/dist

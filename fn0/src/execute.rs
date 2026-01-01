@@ -102,7 +102,7 @@ impl WasmExecutor {
     }
 }
 
-fn engine_config() -> Config {
+pub fn engine_config() -> Config {
     const MB: usize = 1024 * 1024;
 
     let mut sys = sysinfo::System::new_all();
@@ -222,7 +222,7 @@ where
         |context| {
             let state = context.data();
             let cpu_time = state.time_tracker.duration();
-            if cpu_time > Duration::from_millis(10) {
+            if cpu_time > Duration::from_millis(1000) {
                 telemetry::cpu_timeout(&state.code_id, cpu_time);
                 state.is_timeout.store(true, Ordering::Relaxed);
                 return Ok(wasmtime::UpdateDeadline::Interrupt);

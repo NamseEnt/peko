@@ -1,94 +1,65 @@
-# Forte Master Plan v1.0 (Unified - WASM Architecture)
+# Forte
 
 ---
 
-## 1. 아키텍처 개요
+## 1. Architecture
 
-### 1.1 철학
+### 1.1 Principles
 
-**"물리적 분리, 논리적 통합"**
+**"Connect backend and frontend by automatically generated code and types"**
 
-- 코드는 백엔드(Rust)와 프론트엔드(React)로 나뉘어 있지만, 라우팅과 데이터 타입은 CLI에 의해 강력하게 결합됩니다.
-- 개발자는 "설정(Config)"을 건드리지 않습니다. 오직 "규칙(Convention)"에 맞춰 파일만 만듭니다.
-- 프레임워크는 최소한의 기능만 제공하고, 확장은 사용자의 몫입니다.
+## 2. Directory Structure
 
-### 1.2 Core Stack
-
-| 레이어        | 기술                                  | 역할                                           |
-| ------------- | ------------------------------------- | ---------------------------------------------- |
-| CLI           | Rust + Wasmtime 임베딩                | 파일 감지, 코드 파싱, 코드 생성, 프로세스 관리 |
-| Backend       | Rust + wit-bindgen (wasi-http) + wstd | API 서버 (WASM 컴포넌트)                       |
-| Frontend      | React + Vite + Node.js                | SSR 렌더링 서버                                |
-| Communication | CLI 프록시 → Node / backend.wasm      | 요청 라우팅 및 통신                            |
-
-### 1.3 요청 흐름
-
-```
-Browser ──────────────────▶ Forte CLI (3000)
-                                  │
-                    ┌─────────────┴─────────────┐
-                    │                           │
-                    ▼                           ▼
-            [Static Files]              [Dynamic Routes]
-            /client/*, /static/*               │
-                    │               ┌──────────┴──────────┐
-                    │               │                     │
-                    ▼               ▼                     ▼
-                 직접 응답    backend.wasm (Wasmtime)   Node.js
-                                    │                     │
-                                    ▼                     │
-                             PageProps (JSON) ───────────▶│
-                                                          │
-                                                          ▼
-Browser ◀─────────────────────────────────────── HTML + Hydration Script
-```
-
-**핵심**: Forte CLI가 모든 요청의 진입점이 되어 라우팅을 직접 제어합니다.
-
-### 1.4 CLI 프록시 라우팅 규칙
-
-```
-요청 경로                    처리 방식
-────────────────────────────────────────────────────────
-/client/*                   → 정적 파일 직접 서빙
-/static/*                   → 정적 파일 직접 서빙
-/__forte/*              → CLI 내부 API (HMR, 상태 등)
-/api/*                      → backend.wasm 직접 호출 (JSON 응답)
-그 외 모든 경로              → backend.wasm → Node.js SSR
-```
-
----
-
-## 2. 디렉토리 구조
-
-### 2.1 전체 구조
+### 2.1 Project Layout
 
 ```
 my-project/
 ├── backend/
 │   ├── Cargo.toml
 │   ├── .cargo/
-│   │   └── config.toml         [Generated] wasm32-wasip2 타겟 설정
+│   │   └── config.toml         [Generated] wasm32-wasip2 Target Setting
 │   └── src/
-│       └── routes/
-│           ├── mod.rs              [Generated] CLI가 자동 관리
-│           ├── index/
-│           │   └── props.rs        [User Code]
-│           └── product/
-│               └── _id_/           ← Rust는 _id_ 형식
-│                   └── props.rs    [User Code]
+│       ├── lib.rs              [Generated] CLI가 자동 관리
+│       ├── pages/
+│       │   ├── mod.rs          [Generated] CLI가 자동 관리
+│       │   ├── index/
+│       │   │   └── mod.rs      [User Code] PageProps, get_props
+│       │   └── product/
+│       │       └── _id_/
+│       │           ├── mod.rs  [User Code] PageProps, get_props
+│       │           ├── db.rs   [User Code] 자유 분리
+│       │           └── utils.rs[User Code] 자유 분리
+│       │
+│       ├── actions/
+│       │   ├── mod.rs          [Generated] CLI가 자동 관리
+│       │   ├── createPost/
+│       │   │   └── mod.rs      [User Code] Input, Response, Error, action
+│       │   └── auth/
+│       │       ├── mod.rs      [Generated] namespace용
+│       │       ├── login/
+│       │       │   └── mod.rs  [User Code]
+│       │       └── logout/
+│       │           └── mod.rs  [User Code]
+│       │
+│       └── common/             [User Code] CLI 무시, 자유 영역
+│           ├── mod.rs
+│           ├── db.rs
+│           └── auth.rs
 │
 ├── frontend/
 │   ├── package.json
 │   └── src/
-│       └── app/
-│           ├── layout.tsx          [User Code] 루트 레이아웃
-│           ├── index/
-│           │   └── page.tsx        [User Code]
-│           └── product/
-│               └── [id]/           ← Frontend는 [id] 형식
-│                   ├── page.tsx    [User Code]
-│                   └── props.gen.ts [Generated]
+│       ├── app/
+│       │   ├── layout.tsx          [User Code] 루트 레이아웃
+│       │   ├── index/
+│       │   │   ├── page.tsx        [User Code]
+│       │   │   └── props.gen.ts    [Generated]
+│       │   └── product/
+│       │       └── [id]/
+│       │           ├── page.tsx    [User Code]
+│       │           └── props.gen.ts[Generated]
+│       │
+│       └── actions.gen.ts          [Generated] Action 클라이언트
 │
 ├── .generated/                     [Hidden] CLI 생성 코드
 │   ├── backend/
@@ -115,15 +86,6 @@ my-project/
 | `routes/about/`                       | `app/about/`                       | `/about`                     |
 | `routes/product/_id_/`                | `app/product/[id]/`                | `/product/:id`               |
 | `routes/user/_userId_/post/_postId_/` | `app/user/[userId]/post/[postId]/` | `/user/:userId/post/:postId` |
-
-### 2.3 라우트 그룹 (URL 미반영)
-
-```
-app/
-└── (marketing)/        ← 괄호로 감싸면 URL에 미포함
-    ├── about/page.tsx      → /about
-    └── contact/page.tsx    → /contact
-```
 
 ---
 

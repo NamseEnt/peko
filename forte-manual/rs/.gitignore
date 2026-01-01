@@ -1,0 +1,3 @@
+/target
+/src/route_generated.rs
+# /src/pages/**/mod.rs

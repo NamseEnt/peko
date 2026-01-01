@@ -1,0 +1,6 @@
+{
+  "rust-analyzer.rustc.source": "discover",
+  "rust-analyzer.cargo.extraEnv": {
+    "RUSTC_BOOTSTRAP": "1"
+  }
+}

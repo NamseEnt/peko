@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "build": "rolldown -c"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "rolldown": "^1.0.0-beta.57",
+    "typescript": "^5.9.3"
+  }
+}

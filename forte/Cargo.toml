@@ -1,44 +1,17 @@
 [package]
 name = "forte"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
-anyhow = "1.0"
-tokio = { version = "1.35", features = ["full"] }
-syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
-quote = "1.0"
-notify = "6.1"
-notify-debouncer-full = "0.3"
-walkdir = "2.4"
-heck = "0.5"
-ctrlc = "3.4"
-regex = "1.10"
-toml = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-dotenv = "0.15"
-colored = "2.1"
-indicatif = "0.17"
-
-# WASM runtime
-wasmtime = { version = "27", features = ["component-model", "async"] }
-wasmtime-wasi = "27"
-wasmtime-wasi-http = "27"
-
-# HTTP proxy server
-hyper = { version = "1.5", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
+fn0 = { path = "../fn0" }
+adapt-cache = { path = "../adapt-cache" }
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["service"] }
+bytes = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs", "trace"] }
-reqwest = { version = "0.12", features = ["json"] }
-urlencoding = "2.1"
-tokio-tungstenite = "0.23"
-futures-util = "0.3"
-sha1 = "0.10"
-base64 = "0.22"
-
-[dev-dependencies]
-tempfile = "3.12"
+tower = "0.5"
