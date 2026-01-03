@@ -24,12 +24,10 @@ async fn main() -> Result<()> {
 
         Commands::Add { command } => match command {
             AddCommands::Page { path } => {
-                println!("TODO: Add page at '{}'", path);
-                // TODO: Implement add page
+                cli::add::add_page(&path)?;
             }
             AddCommands::Action { path } => {
-                println!("TODO: Add action at '{}'", path);
-                // TODO: Implement add action
+                cli::add::add_action(&path)?;
             }
         },
 

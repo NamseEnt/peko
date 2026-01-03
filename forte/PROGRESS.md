@@ -35,16 +35,53 @@ forte/src/
 - SSR 서버 시작 및 요청 처리
 - E2E 테스트 통과 (2개)
 
+### 4. 프론트엔드 라우터 자동 생성 ✅
+
+- `rs/src/pages/` 디렉토리 스캔
+- `pub async fn handler` 함수가 있는 파일만 라우트로 등록
+- `fe/src/routes.generated.ts` 자동 생성
+- 동적 라우트 지원 (`[id]` → `:id`)
+- `server.tsx`에서 `matchRoute()` 함수로 라우팅 처리
+
+### 5. forte add page ✅
+
+- 현재 디렉토리가 Forte 프로젝트인지 확인 (Forte.toml 체크)
+- 백엔드 페이지 생성 (`rs/src/pages/<path>/mod.rs`)
+- 프론트엔드 페이지 생성 (`fe/src/pages/<path>/page.tsx`)
+- 중첩 경로 지원 (`product/detail` → `product/detail/mod.rs`)
+- 동적 라우트 지원 (`product/[id]` → `Params` 구조체 포함)
+- E2E 테스트 통과 (5개)
+
+### 6. Watch 모드 + 핫 스왑 ✅
+
+- `notify` + `notify-debouncer-mini` 크레이트 사용
+- `rs/src` 및 `fe/src` 디렉토리 감시
+- 파일 변경 시 자동 재빌드 (500ms 디바운스)
+- 캐시 무효화를 통한 핫 스왑 (서버 재시작 없음)
+- 백엔드/프론트엔드 개별 재빌드 지원
+
+### 7. forte add action ✅
+
+- 백엔드 액션 파일 생성 (`rs/src/actions/<path>.rs`)
+- 프론트엔드 클라이언트 생성 (`fe/src/actions/<path>.ts`)
+- Input/Output 타입 자동 생성
+- `/_action/<path>` 엔드포인트로 fetch 호출
+- E2E 테스트 통과 (4개)
+
+### 8. 정적 에셋 서빙 ✅
+
+- `/public/*` 경로로 정적 파일 서빙
+- `/favicon.ico` 자동 처리
+- MIME 타입 자동 감지 (이미지, CSS, JS, 폰트 등)
+- 캐시 헤더 설정 (`Cache-Control: public, max-age=3600`)
+- 경로 탈출 공격 방지 (path traversal protection)
+- `fe/public/` 디렉토리 자동 생성 (init)
+
 ## 다음 단계
 
 | 순서 | 작업 | 상태 |
 |------|------|------|
-| 1 | 프론트엔드 라우터 자동 생성 | 대기 |
-| 2 | `forte add page` + 테스트 | 대기 |
-| 3 | Watch 모드 + 핫 스왑 | 대기 |
-| 4 | `forte add action` + 테스트 | 대기 |
-| 5 | 정적 에셋 서빙 | 대기 |
-| 6 | `forte build` + 테스트 | 대기 |
+| 1 | `forte build` + 테스트 | 대기 |
 
 ## 기술적 결정사항
 

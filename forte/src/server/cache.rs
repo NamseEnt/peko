@@ -21,6 +21,16 @@ impl SimpleCache {
         }
     }
 
+    pub async fn invalidate(&self, id: &str) {
+        let mut cache = self.memory.lock().await;
+        cache.remove(id);
+    }
+
+    pub async fn invalidate_all(&self) {
+        let mut cache = self.memory.lock().await;
+        cache.clear();
+    }
+
     async fn load_file(&self, path: &str) -> Result<Vec<u8>> {
         tokio::fs::read(path).await.map_err(|e| anyhow::anyhow!(e))
     }
