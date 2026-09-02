@@ -227,9 +227,12 @@ impl BrokerClient {
     ) -> Result<Self> {
         validate_account_id(&account_id)?;
         let client = reqwest::Client::new();
-        verify_setup_token(&client, cloudflare_api_base, &setup_token).await?;
+        let setup_token_id = verify_setup_token(&client, cloudflare_api_base, &setup_token).await?;
         let owner_github_id =
             authorize_control_user(&client, &control_url, &control_token, &account_id).await?;
+        let setup_token =
+            roll_setup_token_value(&client, cloudflare_api_base, &setup_token, &setup_token_id)
+                .await?;
         let bootstrap =
             mint_bootstrap_token(&client, cloudflare_api_base, &setup_token, &account_id).await?;
         let result = async {
@@ -508,13 +511,17 @@ pub struct BrokerProvisioned {
     pub minted: MintedCredentialIds,
 }
 
+/// Confirms the token is live and returns its own Cloudflare token id, which
+/// `bootstrap` keeps so it can revoke this exact token once a fresh clone has
+/// taken its place in the broker's Secrets Store.
 async fn verify_setup_token(
     client: &reqwest::Client,
     cloudflare_api_base: &str,
     token: &str,
-) -> Result<()> {
+) -> Result<String> {
     #[derive(Deserialize)]
     struct VerifiedToken {
+        id: String,
         status: String,
     }
     let verified: VerifiedToken = cloudflare_json(
@@ -532,7 +539,68 @@ async fn verify_setup_token(
             verified.status
         ));
     }
-    Ok(())
+    Ok(verified.id)
+}
+
+/// Rolls the token's secret in place (`PUT /user/tokens/{id}/value`) and returns
+/// the new value. The value the caller passed in — off the clipboard, in the
+/// real flow, where a clipboard-history tool may keep a copy — stops working
+/// the moment the roll lands. Cloudflare refuses to mint a token with "API
+/// Tokens" permissions through the API ("sub-token is not allowed to have
+/// permissions to manage other tokens"), so the setup token cannot be
+/// re-created; rolling its secret is the only way to retire the copied value
+/// while keeping a working setup token, and it keeps the token's id, name, and
+/// policies untouched.
+async fn roll_setup_token_value(
+    client: &reqwest::Client,
+    cloudflare_api_base: &str,
+    token: &str,
+    token_id: &str,
+) -> Result<String> {
+    let rolled: String = cloudflare_json(
+        client,
+        cloudflare_api_base,
+        token,
+        reqwest::Method::PUT,
+        &format!("/user/tokens/{token_id}/value"),
+        Some(serde_json::json!({})),
+    )
+    .await?;
+    wait_until_token_active(client, cloudflare_api_base, &rolled).await?;
+    Ok(rolled)
+}
+
+/// A freshly rolled secret is not usable at Cloudflare's edge for a second or
+/// two; poll `verify` so the next call does not race the roll.
+async fn wait_until_token_active(
+    client: &reqwest::Client,
+    cloudflare_api_base: &str,
+    token: &str,
+) -> Result<()> {
+    for attempt in 0..10 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if verify_setup_token(client, cloudflare_api_base, token)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "the rolled Cloudflare setup token did not become active"
+    ))
+}
+
+/// Rolls the secret of the setup token `token` and returns the new value.
+/// `forte cloud rotate --setup-token-from-clipboard` runs the clipboard value
+/// through this before handing the result to the broker, so the token the
+/// broker stores is not the string that sat on the clipboard.
+pub async fn roll_clipboard_setup_token(token: String) -> Result<String> {
+    let client = reqwest::Client::new();
+    let token_id = verify_setup_token(&client, API_BASE, &token).await?;
+    roll_setup_token_value(&client, API_BASE, &token, &token_id).await
 }
 
 async fn authorize_control_user(
@@ -992,7 +1060,7 @@ fn validate_account_id(account_id: &str) -> Result<()> {
 mod tests {
     use super::{BrokerClient, authorize_control_user};
     use serde_json::json;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ACCOUNT_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -1061,6 +1129,21 @@ mod tests {
                 "id": token_id,
                 "value": "temporary-bootstrap-token",
             }))))
+            .mount(cloudflare)
+            .await;
+    }
+
+    // `bootstrap` rolls the secret of the token the caller supplied (off the
+    // clipboard, in the real flow) and works with the rolled value from then
+    // on. `mount_verify` already returns the token's id as
+    // `existing-setup-token-id` and answers the post-roll readiness check.
+    async fn mount_setup_token_roll(cloudflare: &MockServer) {
+        Mock::given(method("PUT"))
+            .and(path("/user/tokens/existing-setup-token-id/value"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(envelope(json!("rolled-setup-token"))),
+            )
+            .expect(1)
             .mount(cloudflare)
             .await;
     }
@@ -1134,6 +1217,7 @@ mod tests {
         let control = MockServer::start().await;
         mount_verify(&cloudflare, "active").await;
         mount_control_authorized(&control, 42).await;
+        mount_setup_token_roll(&cloudflare).await;
         mount_bootstrap_token_mint(&cloudflare, "bootstrap-token-id").await;
         Mock::given(method("GET"))
             .and(path(
@@ -1166,10 +1250,10 @@ mod tests {
         cloudflare.verify().await;
     }
 
-    // External token revocation: if the setup token gets revoked on
-    // Cloudflare's side mid-bootstrap so the cleanup DELETE fails, the work
-    // that already finished must still count as success — a best-effort
-    // cleanup failure must not surface as a bootstrap failure.
+    // External token revocation: if the temporary bootstrap token gets revoked
+    // on Cloudflare's side mid-bootstrap so its cleanup DELETE fails, the work
+    // that already finished must still count as success — a best-effort cleanup
+    // failure must not surface as a bootstrap failure.
     #[tokio::test]
     async fn bootstrap_still_succeeds_when_cleanup_revoke_fails() {
         install_crypto_provider();
@@ -1177,6 +1261,7 @@ mod tests {
         let control = MockServer::start().await;
         mount_verify(&cloudflare, "active").await;
         mount_control_authorized(&control, 42).await;
+        mount_setup_token_roll(&cloudflare).await;
         mount_bootstrap_token_mint(&cloudflare, "bootstrap-token-id").await;
         Mock::given(method("GET"))
             .and(path(
@@ -1263,6 +1348,7 @@ mod tests {
         let control = MockServer::start().await;
         mount_verify(&cloudflare, "active").await;
         mount_control_authorized(&control, 42).await;
+        mount_setup_token_roll(&cloudflare).await;
         mount_bootstrap_token_mint(&cloudflare, "bootstrap-token-id").await;
         Mock::given(method("GET"))
             .and(path(
@@ -1287,7 +1373,7 @@ mod tests {
                 "/accounts/0123456789abcdef0123456789abcdef/secrets_store/stores/store-id/secrets/existing-secret-id",
             ))
             .and(body_json(json!({
-                "value": "setup-token",
+                "value": "rolled-setup-token",
                 "scopes": ["workers"],
                 "comment": "Forte Cloudflare broker setup token",
             })))
@@ -1337,6 +1423,131 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "unexpected error: {result:?}");
+        cloudflare.verify().await;
+    }
+
+    // The token the caller supplies comes off the clipboard, where a
+    // clipboard-history tool may keep a copy. bootstrap rolls its secret in
+    // place and stores the rolled value — the string that was on the clipboard
+    // stops working.
+    #[tokio::test]
+    async fn bootstrap_rolls_the_supplied_setup_token() {
+        install_crypto_provider();
+        let cloudflare = MockServer::start().await;
+        let control = MockServer::start().await;
+        mount_verify(&cloudflare, "active").await;
+        mount_control_authorized(&control, 42).await;
+        mount_setup_token_roll(&cloudflare).await;
+        mount_bootstrap_token_mint(&cloudflare, "bootstrap-token-id").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/accounts/0123456789abcdef0123456789abcdef/secrets_store/stores",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(envelope(json!([{"id": "store-id"}]))),
+            )
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/accounts/0123456789abcdef0123456789abcdef/secrets_store/stores/store-id/secrets",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([]))))
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/accounts/0123456789abcdef0123456789abcdef/secrets_store/stores/store-id/secrets",
+            ))
+            .and(body_string_contains("rolled-setup-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!([{}]))))
+            .expect(1)
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/accounts/0123456789abcdef0123456789abcdef/workers/scripts/fn0-broker",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!({}))))
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/accounts/0123456789abcdef0123456789abcdef/workers/scripts/fn0-broker/subdomain",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(envelope(json!({"enabled": true}))),
+            )
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/accounts/0123456789abcdef0123456789abcdef/workers/subdomain",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!({
+                "subdomain": "fn0-01234567",
+            }))))
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/tokens/bootstrap-token-id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!({}))))
+            .expect(1)
+            .mount(&cloudflare)
+            .await;
+
+        let result = BrokerClient::bootstrap_with_cloudflare_api_base(
+            "clipboard-setup-token".to_string(),
+            ACCOUNT_ID.to_string(),
+            control.uri(),
+            "control-token".to_string(),
+            &cloudflare.uri(),
+            0,
+        )
+        .await;
+
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+        cloudflare.verify().await;
+    }
+
+    // A failure rolling the setup token leaves nothing deployed — no bootstrap
+    // token, no Worker — so it aborts rather than half-installing a broker.
+    #[tokio::test]
+    async fn bootstrap_fails_when_the_setup_token_cannot_be_rolled() {
+        install_crypto_provider();
+        let cloudflare = MockServer::start().await;
+        let control = MockServer::start().await;
+        mount_verify(&cloudflare, "active").await;
+        mount_control_authorized(&control, 42).await;
+        Mock::given(method("PUT"))
+            .and(path("/user/tokens/existing-setup-token-id/value"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(error_envelope("insufficient permissions")),
+            )
+            .mount(&cloudflare)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(json!({
+                "id": "should-not-be-minted",
+                "value": "should-not-be-minted",
+            }))))
+            .expect(0)
+            .mount(&cloudflare)
+            .await;
+
+        let result = BrokerClient::bootstrap_with_cloudflare_api_base(
+            "clipboard-setup-token".to_string(),
+            ACCOUNT_ID.to_string(),
+            control.uri(),
+            "control-token".to_string(),
+            &cloudflare.uri(),
+            0,
+        )
+        .await;
+
+        assert!(result.is_err());
         cloudflare.verify().await;
     }
 

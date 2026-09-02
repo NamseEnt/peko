@@ -37,6 +37,9 @@ and uses it once to install a small broker Worker in your own account. After
 that, the token lives only inside that Worker's Secrets Store; the CLI never
 holds it again, and later runs for this project or any other project on the
 same account reuse the broker without asking for the token a second time.
+(`--setup-token-from-clipboard` swaps the masked prompt for a clipboard
+hand-off, so an AI agent can create the token for you — see
+[AI-assisted setup](#ai-assisted-setup).)
 
 As part of initialization, the CLI enables WebSockets for the selected zone.
 This is required for Forte WebSocket routes to complete their upgrade through
@@ -85,6 +88,40 @@ want a new one, `forte cloud rotate` replaces it in place; `forte cloud
 clear` removes it without replacing it; `forte cloud destroy` removes the
 whole broker, token included. See [`forte cloud`](../forte/cli.md#forte-cloud-init)
 for all three.
+
+## AI-assisted setup
+
+`forte cloud init --setup-token-from-clipboard` and `forte cloud rotate
+--setup-token-from-clipboard` take the setup token from the OS clipboard
+instead of a masked prompt: the command waits, you (or an AI agent driving your
+browser) create the token in the dashboard and click its **Copy** button, and
+the command picks it up, verifies it against Cloudflare, and wipes the
+clipboard. The token never becomes a command argument, an environment variable,
+or a file, and — when an agent does the clicking — it need not pass through the
+agent's own context: the agent only clicks the native Copy control.
+
+During bootstrap `forte` rolls the token's secret in place — Cloudflare will
+not re-create a token that can manage tokens, so the secret is regenerated
+rather than the token cloned — and stores the rolled value. The token keeps its
+name and permission; the string that briefly sat on the clipboard stops
+working the moment the roll lands.
+
+The dashboard steps are the same whichever tool does them:
+
+1. `https://dash.cloudflare.com/profile/api-tokens` → **Create Token**.
+2. Scroll to the **"Create Additional Tokens"** template → **Use template**.
+   (Not "Create Custom Token" — `User -> API Tokens -> Edit` is not reliably
+   offered there.)
+3. The form is pre-filled with `User | API Tokens | Edit`. **Continue to
+   summary** → **Create Token**.
+4. Click **Copy**. `forte` takes it from there.
+
+Signing in, two-factor auth, and any identity re-prompt are yours to do in the
+browser — an agent must not type credentials. Creating the token is a real
+change to your account, so approve it before the final click.
+
+Claude Code users: run the `cloudflare-setup-token` skill, which drives this
+in the browser.
 
 ## What the stored credentials can do
 

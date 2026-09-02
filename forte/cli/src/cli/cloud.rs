@@ -11,6 +11,7 @@ pub async fn init(
     project_dir: PathBuf,
     requested_project_name: Option<String>,
     requested_zone: Option<String>,
+    setup_token_from_clipboard: bool,
 ) -> Result<()> {
     let config = read_cloud_config(&project_dir)?;
     let has_project_id = config.project_id.is_some();
@@ -60,7 +61,7 @@ pub async fn init(
                 settings.account_id,
             )?,
             None => {
-                let setup_token = prompt_cloudflare_token()?;
+                let setup_token = obtain_setup_token(setup_token_from_clipboard).await?;
                 println!("checking the Cloudflare account and installing the setup broker...");
                 let zones = ZoneDiscovery::new(setup_token.clone()).list().await?;
                 let zone = resolve_zone(zones, &zone_name)?;
@@ -160,10 +161,15 @@ pub async fn init(
     Ok(())
 }
 
-pub async fn rotate(project_dir: PathBuf) -> Result<()> {
+pub async fn rotate(project_dir: PathBuf, setup_token_from_clipboard: bool) -> Result<()> {
     let creds = fn0_deploy::credentials::require()?;
     let broker = load_broker(&project_dir, &creds)?;
-    let replacement = prompt_cloudflare_token()?;
+    let replacement = obtain_setup_token(setup_token_from_clipboard).await?;
+    let replacement = if setup_token_from_clipboard {
+        fn0_deploy::roll_clipboard_setup_token(replacement).await?
+    } else {
+        replacement
+    };
     broker.rotate_setup_token(&replacement).await?;
     println!("Cloudflare broker setup token rotated");
     Ok(())
@@ -249,6 +255,15 @@ fn load_broker(
     }
 }
 
+async fn obtain_setup_token(from_clipboard: bool) -> Result<String> {
+    if from_clipboard {
+        print_setup_token_instructions();
+        fn0_deploy::read_setup_token_from_clipboard().await
+    } else {
+        prompt_cloudflare_token()
+    }
+}
+
 fn prompt_cloudflare_token() -> Result<String> {
     let token = inquire::Password::new("Cloudflare setup token")
         .without_confirmation()
@@ -258,6 +273,22 @@ fn prompt_cloudflare_token() -> Result<String> {
         return Err(anyhow!("Cloudflare setup token cannot be empty."));
     }
     Ok(trimmed_token.to_string())
+}
+
+fn print_setup_token_instructions() {
+    println!();
+    println!("Need a Cloudflare setup token (User -> API Tokens -> Edit). Get one of these ways:");
+    println!();
+    println!("  Claude Code   run the \"cloudflare-setup-token\" skill");
+    println!("  Other agent   docs/fn0/cloudflare.md#ai-assisted-setup — same dashboard steps");
+    println!("  By hand       https://dash.cloudflare.com/profile/api-tokens");
+    println!(
+        "                Create Token -> \"Create Additional Tokens\" template -> Create -> Copy"
+    );
+    println!();
+    println!("Waiting for the token on the clipboard. Copy it and it is picked up here;");
+    println!("it is verified against Cloudflare, then wiped from the clipboard.");
+    println!();
 }
 
 fn resolve_setting(

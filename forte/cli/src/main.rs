@@ -127,13 +127,18 @@ async fn async_main() -> Result<()> {
                 project,
                 project_name,
                 zone,
+                setup_token_from_clipboard,
             } => {
                 let project_dir = project.unwrap_or_else(|| ".".into());
-                cli::cloud::init(project_dir, project_name, zone).await?;
+                cli::cloud::init(project_dir, project_name, zone, setup_token_from_clipboard)
+                    .await?;
             }
-            CloudCommands::Rotate { project } => {
+            CloudCommands::Rotate {
+                project,
+                setup_token_from_clipboard,
+            } => {
                 let project_dir = project.unwrap_or_else(|| ".".into());
-                cli::cloud::rotate(project_dir).await?;
+                cli::cloud::rotate(project_dir, setup_token_from_clipboard).await?;
             }
             CloudCommands::Clear { project, yes } => {
                 let project_dir = project.unwrap_or_else(|| ".".into());

@@ -144,11 +144,21 @@ pub enum CloudCommands {
             help = "Cloudflare zone name, not a zone ID; required for a new project"
         )]
         zone: Option<String>,
+        #[arg(
+            long,
+            help = "Read the first-time setup token from the clipboard instead of a prompt, for when an AI agent creates it in the Cloudflare dashboard"
+        )]
+        setup_token_from_clipboard: bool,
     },
     #[command(about = "Replace the setup token stored by the Cloudflare broker")]
     Rotate {
         #[arg(short, long)]
         project: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Read the replacement setup token from the clipboard instead of a prompt"
+        )]
+        setup_token_from_clipboard: bool,
     },
     #[command(about = "Delete the broker setup secret and revoke its token")]
     Clear {

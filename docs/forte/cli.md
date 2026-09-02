@@ -284,6 +284,15 @@ account and stores the token only inside that Worker's Secrets Store. Every
 later run, for this project or any other project on the same account, reuses
 the broker and does not ask for the token again.
 
+`--setup-token-from-clipboard` replaces that masked prompt with a clipboard
+hand-off: the command waits while you (or an AI agent driving your browser)
+create the token in the Cloudflare dashboard and click **Copy**, then reads it
+from the clipboard, verifies it, and wipes the clipboard. During bootstrap
+`forte` rolls the token's secret in place, so the string that was copied stops
+working while the setup token itself keeps its name and permission. Needs a
+desktop session (it cannot reach a clipboard over SSH or in CI). See
+[AI-assisted setup](../fn0/cloudflare.md#ai-assisted-setup).
+
 `--zone` is a Cloudflare zone name such as `example.com`, not the internal
 hexadecimal zone ID. The CLI resolves the exact zone and must not choose one
 implicitly when several zones are accessible.
@@ -333,9 +342,10 @@ forte cloud rotate --project .
 ```
 
 Replaces the setup token stored in the broker's Secrets Store. Asks for the
-new token through the same masked prompt as `init`, then has the broker save
-it and revoke the old one. Every project already connected through this
-broker keeps working — this only changes which token the broker itself holds.
+new token through the same masked prompt as `init` (or reads it from the
+clipboard with `--setup-token-from-clipboard`), then has the broker save it
+and revoke the old one. Every project already connected through this broker
+keeps working — this only changes which token the broker itself holds.
 
 #### `forte cloud clear`
 

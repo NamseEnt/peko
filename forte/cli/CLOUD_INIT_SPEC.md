@@ -27,6 +27,16 @@ On the first run, `forte cloud init` asks for the Cloudflare setup token through
 a masked prompt. It is never a command-line argument, environment variable,
 printed value, or project/local credential-store entry.
 
+`--setup-token-from-clipboard` replaces the masked prompt with a clipboard
+hand-off: the command polls the OS clipboard, and the token is created in the
+Cloudflare dashboard — by the user, or by an AI agent driving the browser — and
+put on the clipboard with the dashboard's own Copy control. The command reads it
+from the clipboard, verifies it against Cloudflare, and overwrites the
+clipboard. The token is still never an argument, environment variable, printed
+value, or credential-store entry, and an agent that only clicks Copy never
+handles the value. The mode needs a desktop session; with no reachable
+clipboard (SSH, CI) it is an error.
+
 The first run uses the token only during bootstrap of the per-account
 `fn0-broker` Worker. The token is saved as `FN0_SETUP_TOKEN` in the user's Cloudflare
 account-level Secrets Store with the `workers` scope, and the Worker receives
@@ -44,6 +54,7 @@ token.
 | `-p, --project <dir>` | no | Forte project directory; defaults to `.` |
 | `--project-name <name>` | for a new project | Project identity and DNS label |
 | `--zone <name>` | for a new project | Cloudflare zone name, such as `example.com` |
+| `--setup-token-from-clipboard` | no | Read the first-run setup token from the clipboard instead of a masked prompt |
 
 `--domain` is not part of the default contract. The public hostname is
 derived as `<project-name>.<zone>`.
@@ -97,6 +108,16 @@ Worker, then revokes that temporary token. The setup token itself is sent only
 to Cloudflare during bootstrap and is never sent to fn0-control or the broker
 API as a request value.
 
+The secret value the user supplies is not the one the broker keeps. Cloudflare
+refuses to mint a token carrying `API Tokens` permissions through the API, so
+the setup token cannot be re-created; during bootstrap the CLI rolls its secret
+in place (`PUT /user/tokens/{id}/value`) and stores the rolled value as
+`FN0_SETUP_TOKEN`. The token keeps its id, name, and policy; only the secret
+string changes, and the string that passed through a prompt or the clipboard
+stops working the moment the roll lands. `forte cloud rotate
+--setup-token-from-clipboard` rolls the value the same way before handing it to
+the broker.
+
 The broker is the only component that reads `FN0_SETUP_TOKEN` after bootstrap.
 It accepts fixed operations only: exact zone lookup, project resource
 provisioning, WebSockets, origin certificate issuance, domain finalization, and
@@ -110,8 +131,9 @@ created with only the permissions and resource scope required by each project.
 ## Operation order
 
 1. Validate all local arguments.
-2. Load the saved broker configuration, or read the setup token and install the
-   user's account-level broker Worker and Secrets Store binding.
+2. Load the saved broker configuration, or read the setup token (prompt or
+   clipboard), roll its secret, and install the user's account-level broker
+   Worker and Secrets Store binding around the rolled value.
 3. Resolve the exact Cloudflare zone name through the broker.
 4. Derive and validate `<project-name>.<zone>`.
 5. Create or resolve the Forte project identity.
@@ -142,4 +164,6 @@ fails, including:
 
 If the account has no saved broker configuration, an empty setup-token prompt
 is also an error. Token rotation also uses a masked prompt and never reads a
-local environment variable.
+local environment variable. Both `init` and `rotate` accept
+`--setup-token-from-clipboard` instead; in that mode an unreachable clipboard,
+or no accepted token within the poll window, is an error.

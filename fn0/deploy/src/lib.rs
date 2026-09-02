@@ -14,6 +14,7 @@ pub mod env;
 mod name;
 mod project;
 mod public_purge;
+mod setup_token_clipboard;
 mod static_files;
 mod static_page_purge;
 
@@ -33,5 +34,6 @@ pub use domain::*;
 pub use name::*;
 pub use project::*;
 pub use public_purge::*;
+pub use setup_token_clipboard::*;
 pub use static_files::*;
 pub use static_page_purge::*;
