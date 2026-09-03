@@ -136,6 +136,24 @@ struct RevokeProjectCredentialsInput<'a> {
     purge: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct TeardownProjectInput<'a> {
+    project_id: &'a str,
+    zone_id: &'a str,
+    zone_name: &'a str,
+    app_hostname: &'a str,
+    delete_buckets: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TeardownProjectOutcome {
+    /// Human-readable lines about anything the broker deliberately left alone
+    /// (a DNS record the owner edited, a bucket teardown had not finished
+    /// clearing). Empty on a clean run.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct OriginCertificateResponse {
     certificate_pem: String,
@@ -445,6 +463,34 @@ impl BrokerClient {
                 frontend_asset: &ids.frontend_asset,
                 purge: &ids.purge,
             },
+        )
+        .await
+    }
+
+    /// Removes the project's Cloudflare footprint that `forte destroy`'s
+    /// fn0-side teardown cannot reach: the app hostname's DNS record, the two
+    /// public buckets' custom domains, the origin certificate, and the three
+    /// minted R2/purge tokens. With `delete_buckets`, also deletes the three
+    /// (by then empty) buckets. Every step tolerates its target already being
+    /// gone.
+    pub async fn teardown_project(
+        &self,
+        project_id: &str,
+        zone_id: &str,
+        zone_name: &str,
+        app_hostname: &str,
+        delete_buckets: bool,
+    ) -> Result<TeardownProjectOutcome> {
+        self.post_json(
+            "/v1/teardown-project",
+            &TeardownProjectInput {
+                project_id,
+                zone_id,
+                zone_name,
+                app_hostname,
+                delete_buckets,
+            },
+            true,
         )
         .await
     }
@@ -1611,6 +1657,69 @@ mod tests {
         let error = client.resolve_zone("example.com").await.unwrap_err();
         assert!(
             error.to_string().contains("409"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_project_sends_its_inputs_and_returns_the_brokers_notes() {
+        install_crypto_provider();
+        let broker = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/teardown-project"))
+            .and(body_json(json!({
+                "project_id": "abcd1234",
+                "zone_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+                "zone_name": "example.com",
+                "app_hostname": "my-app.example.com",
+                "delete_buckets": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "notes": ["left bucket fn0-abcd1234-frontend-asset: still not empty"],
+            })))
+            .mount(&broker)
+            .await;
+        let client = broker_client_for_test(broker.uri());
+
+        let outcome = client
+            .teardown_project(
+                "abcd1234",
+                "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+                "example.com",
+                "my-app.example.com",
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.notes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn teardown_project_propagates_a_broker_failure() {
+        install_crypto_provider();
+        let broker = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/teardown-project"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({ "error": "boom" })))
+            .mount(&broker)
+            .await;
+        let client = broker_client_for_test(broker.uri());
+
+        let error = client
+            .teardown_project(
+                "abcd1234",
+                "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+                "example.com",
+                "my-app.example.com",
+                false,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("500"),
             "unexpected error: {error}"
         );
     }

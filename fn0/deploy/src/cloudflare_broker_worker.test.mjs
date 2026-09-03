@@ -109,11 +109,17 @@ function makeRequest(pathname, body, headers = defaultHeaders()) {
 async function withStubbedFetch(routes, run) {
   const { fetchStub, calls } = makeFetchStub(routes);
   const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
   globalThis.fetch = fetchStub;
+  // The worker's backoff sleeps (auth retry, bucket-delete retry) are real
+  // wall-clock waits; collapse them so tests exercising a retry path do not
+  // actually sit for tens of seconds.
+  globalThis.setTimeout = (callback) => originalSetTimeout(callback, 0);
   try {
     return { calls, result: await run() };
   } finally {
     globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
   }
 }
 
@@ -468,4 +474,182 @@ test("destroy-broker is a no-op, not a failure, when everything is already gone"
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
+});
+
+const TEARDOWN_ZONE_ID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4";
+const TEARDOWN_PROJECT_ID = "abcd1234";
+const TEARDOWN_APP_HOSTNAME = "my-app.example.com";
+const PUBLIC_BUCKET_HOSTNAME = `fn0-${TEARDOWN_PROJECT_ID}-public-object-storage.example.com`;
+const ASSET_BUCKET_HOSTNAME = `fn0-${TEARDOWN_PROJECT_ID}-frontend-asset.example.com`;
+
+function teardownRequest(overrides = {}) {
+  return makeRequest("/v1/teardown-project", {
+    project_id: TEARDOWN_PROJECT_ID,
+    zone_id: TEARDOWN_ZONE_ID,
+    zone_name: "example.com",
+    app_hostname: TEARDOWN_APP_HOSTNAME,
+    delete_buckets: false,
+    ...overrides,
+  });
+}
+
+function teardownProjectRoutes({
+  dnsRecordsResponds = () => jsonResponse(cf([{ id: "cname-id", type: "CNAME", proxied: true }])),
+  certificatesResponds = () =>
+    jsonResponse(cf([{ id: "cert-id", hostnames: [TEARDOWN_APP_HOSTNAME] }])),
+  userTokensResponds = () =>
+    jsonResponse(
+      cf([
+        { id: "w".repeat(32), name: `fn0 worker (${TEARDOWN_PROJECT_ID})` },
+        { id: "f".repeat(32), name: `fn0 frontend assets (${TEARDOWN_PROJECT_ID})` },
+        { id: "p".repeat(32), name: `fn0 cache purge (${TEARDOWN_PROJECT_ID})` },
+        { id: "o".repeat(32), name: "fn0 cache purge (some-other-project)" },
+      ]),
+    ),
+  deleteBucketResponds = () => jsonResponse(cf({})),
+} = {}) {
+  return [
+    controlAuthorizes(OWNER_GITHUB_ID),
+    route("POST", "/user/tokens", "Bearer setup-token", () =>
+      jsonResponse(cf({ id: "prov-id", value: "prov-token" })),
+    ),
+    route("DELETE", "/user/tokens/prov-id", "Bearer setup-token", () => jsonResponse(cf({}))),
+    route("GET", `/zones/${TEARDOWN_ZONE_ID}/dns_records`, "Bearer prov-token", dnsRecordsResponds),
+    route("DELETE", `/zones/${TEARDOWN_ZONE_ID}/dns_records/cname-id`, "Bearer prov-token", () =>
+      jsonResponse(cf({})),
+    ),
+    route(
+      "DELETE",
+      `/accounts/${ACCOUNT_ID}/r2/buckets/fn0-${TEARDOWN_PROJECT_ID}-public-object-storage/domains/custom/${PUBLIC_BUCKET_HOSTNAME}`,
+      "Bearer prov-token",
+      () => jsonResponse(cf({})),
+    ),
+    route(
+      "DELETE",
+      `/accounts/${ACCOUNT_ID}/r2/buckets/fn0-${TEARDOWN_PROJECT_ID}-frontend-asset/domains/custom/${ASSET_BUCKET_HOSTNAME}`,
+      "Bearer prov-token",
+      () => jsonResponse(cf({})),
+    ),
+    route("GET", "/certificates", "Bearer prov-token", certificatesResponds),
+    route("DELETE", "/certificates/cert-id", "Bearer prov-token", () => jsonResponse(cf({}))),
+    route("GET", "/user/tokens", "Bearer setup-token", userTokensResponds),
+    route("DELETE", `/user/tokens/${"w".repeat(32)}`, "Bearer setup-token", () => jsonResponse(cf({}))),
+    route("DELETE", `/user/tokens/${"f".repeat(32)}`, "Bearer setup-token", () => jsonResponse(cf({}))),
+    route("DELETE", `/user/tokens/${"p".repeat(32)}`, "Bearer setup-token", () => jsonResponse(cf({}))),
+    route(
+      "DELETE",
+      `/accounts/${ACCOUNT_ID}/r2/buckets/fn0-${TEARDOWN_PROJECT_ID}-private-object-storage`,
+      "Bearer prov-token",
+      deleteBucketResponds,
+    ),
+    route(
+      "DELETE",
+      `/accounts/${ACCOUNT_ID}/r2/buckets/fn0-${TEARDOWN_PROJECT_ID}-public-object-storage`,
+      "Bearer prov-token",
+      deleteBucketResponds,
+    ),
+    route(
+      "DELETE",
+      `/accounts/${ACCOUNT_ID}/r2/buckets/fn0-${TEARDOWN_PROJECT_ID}-frontend-asset`,
+      "Bearer prov-token",
+      deleteBucketResponds,
+    ),
+  ];
+}
+
+// Happy path: the app DNS record, both bucket custom domains, the origin
+// certificate, and exactly the three project tokens (never another project's)
+// are removed; buckets are left standing.
+test("teardown-project removes the DNS record, custom domains, certificate, and the three project tokens", async () => {
+  const { calls, result: response } = await withStubbedFetch(teardownProjectRoutes(), () =>
+    worker.fetch(teardownRequest(), makeEnv()),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, notes: [] });
+  const deletes = calls.filter((call) => call.method === "DELETE").map((call) => call.pathname);
+  assert.ok(deletes.includes(`/zones/${TEARDOWN_ZONE_ID}/dns_records/cname-id`));
+  assert.ok(deletes.includes("/certificates/cert-id"));
+  assert.ok(deletes.includes(`/user/tokens/${"w".repeat(32)}`));
+  assert.ok(deletes.includes(`/user/tokens/${"p".repeat(32)}`));
+  assert.equal(
+    deletes.includes(`/user/tokens/${"o".repeat(32)}`),
+    false,
+    "another project's token must not be touched",
+  );
+  assert.equal(
+    deletes.some((path) => path === `/accounts/${ACCOUNT_ID}/r2/buckets/fn0-${TEARDOWN_PROJECT_ID}-private-object-storage`),
+    false,
+    "buckets must be left standing without --delete-buckets",
+  );
+});
+
+// The owner edited the app record (added an A record); it is left in place and
+// reported rather than deleted.
+test("teardown-project leaves an app DNS record the owner has edited and reports it", async () => {
+  const routes = teardownProjectRoutes({
+    dnsRecordsResponds: () =>
+      jsonResponse(cf([{ id: "a-id", type: "A", proxied: true }, { id: "cname-id", type: "CNAME", proxied: true }])),
+  });
+
+  const { calls, result: response } = await withStubbedFetch(routes, () =>
+    worker.fetch(teardownRequest(), makeEnv()),
+  );
+
+  assert.equal(response.status, 200);
+  const { notes } = await response.json();
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /my-app\.example\.com/);
+  assert.equal(
+    calls.some((call) => call.method === "DELETE" && call.pathname.startsWith(`/zones/${TEARDOWN_ZONE_ID}/dns_records`)),
+    false,
+  );
+});
+
+// A missing certificate list (Origin CA never issued one, or already revoked)
+// is tolerated, not fatal.
+test("teardown-project tolerates a certificate lookup that 404s", async () => {
+  const routes = teardownProjectRoutes({
+    certificatesResponds: () => jsonResponse(cfError("not found", 1000), 404),
+  });
+
+  const { result: response } = await withStubbedFetch(routes, () =>
+    worker.fetch(teardownRequest(), makeEnv()),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, notes: [] });
+});
+
+// --delete-buckets: the three buckets are deleted once empty.
+test("teardown-project deletes the buckets with delete_buckets", async () => {
+  const { calls, result: response } = await withStubbedFetch(teardownProjectRoutes(), () =>
+    worker.fetch(teardownRequest({ delete_buckets: true }), makeEnv()),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, notes: [] });
+  const bucketDeletes = calls.filter(
+    (call) => call.method === "DELETE" && /\/r2\/buckets\/fn0-abcd1234-[a-z-]+$/.test(call.pathname),
+  );
+  assert.equal(bucketDeletes.length, 3);
+});
+
+// --delete-buckets: a bucket teardown has not finished emptying is reported,
+// and the rest of the teardown still completes.
+test("teardown-project reports a bucket that is still not empty", async () => {
+  const routes = teardownProjectRoutes({
+    deleteBucketResponds: () => jsonResponse(cfError("The bucket you tried to delete is not empty", 10000), 409),
+  });
+
+  const { calls, result: response } = await withStubbedFetch(routes, () =>
+    worker.fetch(teardownRequest({ delete_buckets: true }), makeEnv()),
+  );
+
+  assert.equal(response.status, 200);
+  const { ok, notes } = await response.json();
+  assert.equal(ok, true);
+  assert.equal(notes.length, 3);
+  assert.ok(notes.every((note) => /not empty/.test(note)));
+  assert.ok(calls.some((call) => call.method === "DELETE" && call.pathname === "/certificates/cert-id"));
 });

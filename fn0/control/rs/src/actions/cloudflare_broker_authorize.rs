@@ -20,7 +20,7 @@ pub enum Output {
     InternalError,
 }
 
-const ALLOWED_OPERATIONS: [&str; 9] = [
+const ALLOWED_OPERATIONS: [&str; 10] = [
     "resolve_zone",
     "provision_project",
     "ensure_websockets",
@@ -30,6 +30,7 @@ const ALLOWED_OPERATIONS: [&str; 9] = [
     "rotate_token",
     "clear_token",
     "destroy_broker",
+    "teardown_project",
 ];
 
 pub async fn handler(req: ForteRequest<'_, Input>) -> Output {
@@ -150,6 +151,30 @@ mod tests {
             let db = doc_db::memory();
             let output = authorize(&db, "provision_project", ACCOUNT_ID, Some("missing1"), 7).await;
             assert!(matches!(output, Output::NotFound));
+        });
+    }
+
+    #[test]
+    fn teardown_project_is_gated_on_project_ownership() {
+        futures::executor::block_on(async {
+            let db = doc_db::memory();
+            ProjectDocPut(ProjectDoc {
+                project_id: "abcd1234".to_string(),
+                owner_github_id: 7,
+                name: "demo".to_string(),
+                created_at: forte_sdk::now(),
+            })
+            .send_with(&db)
+            .await
+            .unwrap();
+            assert!(matches!(
+                authorize(&db, "teardown_project", ACCOUNT_ID, Some("abcd1234"), 7).await,
+                Output::Authorized { github_id: 7 }
+            ));
+            assert!(matches!(
+                authorize(&db, "teardown_project", ACCOUNT_ID, Some("abcd1234"), 9).await,
+                Output::NotFound
+            ));
         });
     }
 }

@@ -8,6 +8,8 @@ const REQUEST_WINDOW_MS = 60_000;
 const REQUEST_LIMIT = 30;
 const REQUEST_MAX_AGE_MS = 5 * 60_000;
 const REQUEST_ID_TTL_MS = 10 * 60_000;
+const BUCKET_DELETE_ATTEMPTS = 3;
+const BUCKET_DELETE_DELAY_MS = 4000;
 const requestCounters = new Map();
 const requestIds = new Map();
 
@@ -958,6 +960,158 @@ async function finalizeDomain(setupToken, accountId, body) {
   );
 }
 
+async function deleteAppDnsRecord(token, zoneId, appHostname) {
+  const records = await dnsRecords(token, zoneId, appHostname);
+  const resolving = records.filter((record) => ["A", "AAAA", "CNAME"].includes(record.type));
+  // `forte cloud init` only ever writes a single proxied CNAME on the project
+  // hostname, and refuses to run if an A/AAAA is already there. Anything else
+  // on this name was put there by the owner: leave it and report.
+  if (resolving.length === 1 && resolving[0].type === "CNAME" && resolving[0].proxied) {
+    await cloudflareRequest(token, "DELETE", `/zones/${zoneId}/dns_records/${resolving[0].id}`);
+    return null;
+  }
+  if (resolving.length === 0) {
+    return null;
+  }
+  return `left ${appHostname}: its DNS records are not the single proxied CNAME fn0 wrote`;
+}
+
+async function detachBucketCustomDomain(token, accountId, bucketName, hostname) {
+  try {
+    await cloudflareRequest(
+      token,
+      "DELETE",
+      `/accounts/${accountId}/r2/buckets/${bucketName}/domains/custom/${encodeURIComponent(hostname)}`,
+    );
+  } catch (error) {
+    if (!isNotFound(error)) {
+      throw error;
+    }
+  }
+}
+
+async function deleteOriginCertificates(token, zoneId, appHostname) {
+  let certificates;
+  try {
+    certificates = await cloudflareRequest(token, "GET", `/certificates?zone_id=${zoneId}`);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return;
+    }
+    throw error;
+  }
+  for (const certificate of certificates ?? []) {
+    if (!Array.isArray(certificate.hostnames) || !certificate.hostnames.includes(appHostname)) {
+      continue;
+    }
+    try {
+      await cloudflareRequest(token, "DELETE", `/certificates/${certificate.id}`);
+    } catch (error) {
+      if (!isNotFound(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
+async function revokeProjectCredentialsByName(setupToken, projectId) {
+  const wanted = new Map(
+    ["worker", "frontend assets", "cache purge"].map((purpose) => [
+      `fn0 ${purpose} (${projectId})`,
+      purpose,
+    ]),
+  );
+  const seen = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const batch =
+      (await cloudflareRequest(setupToken, "GET", `/user/tokens?per_page=50&page=${page}`)) ?? [];
+    seen.push(...batch);
+    if (batch.length < 50) {
+      break;
+    }
+  }
+  for (const token of seen) {
+    if (wanted.has(token.name)) {
+      await revokeBestEffort(setupToken, token.id, wanted.get(token.name));
+    }
+  }
+}
+
+// The bucket can only be deleted once it is empty, and control's teardown
+// empties it asynchronously. A couple of short retries (BUCKET_DELETE_*) cover
+// the case where that has just started; if it is still not empty, the caller
+// reports it and the owner re-runs (idempotent) or deletes the empty bucket
+// from the dashboard later.
+async function deleteBucketShell(token, accountId, bucketName) {
+  for (let attempt = 0; attempt < BUCKET_DELETE_ATTEMPTS; attempt += 1) {
+    try {
+      await cloudflareRequest(
+        token,
+        "DELETE",
+        `/accounts/${accountId}/r2/buckets/${bucketName}`,
+      );
+      return null;
+    } catch (error) {
+      if (isNotFound(error)) {
+        return null;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("not empty") && !message.includes("(409)")) {
+        throw error;
+      }
+      if (attempt < BUCKET_DELETE_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, BUCKET_DELETE_DELAY_MS));
+      }
+    }
+  }
+  return `left bucket ${bucketName}: still not empty (teardown is still clearing it) — re-run once it finishes`;
+}
+
+async function teardownProject(setupToken, accountId, body) {
+  const projectId = ensureProjectId(ensureString(body.project_id, "project_id"));
+  const zoneId = ensureZoneId(ensureString(body.zone_id, "zone_id"));
+  const zoneName = ensureHostname(ensureString(body.zone_name, "zone_name"));
+  const appHostname = ensureHostname(ensureString(body.app_hostname, "app_hostname"));
+  const deleteBuckets = body.delete_buckets === true;
+  if (!appHostname.endsWith(`.${zoneName}`)) {
+    throw new Error("app hostname does not belong to the selected zone");
+  }
+  const buckets = bucketNames(projectId);
+  const notes = [];
+
+  await withProvisioning(setupToken, accountId, zoneId, `teardown ${projectId}`, async (token) => {
+    const dnsNote = await deleteAppDnsRecord(token, zoneId, appHostname);
+    if (dnsNote) {
+      notes.push(dnsNote);
+    }
+    await detachBucketCustomDomain(
+      token,
+      accountId,
+      buckets.publicObjectStorageBucket,
+      `${buckets.publicObjectStorageBucket}.${zoneName}`,
+    );
+    await detachBucketCustomDomain(
+      token,
+      accountId,
+      buckets.frontendAssetBucket,
+      `${buckets.frontendAssetBucket}.${zoneName}`,
+    );
+    await deleteOriginCertificates(token, zoneId, appHostname);
+    if (deleteBuckets) {
+      for (const bucketName of Object.values(buckets)) {
+        const bucketNote = await deleteBucketShell(token, accountId, bucketName);
+        if (bucketNote) {
+          notes.push(bucketNote);
+        }
+      }
+    }
+  });
+
+  await revokeProjectCredentialsByName(setupToken, projectId);
+
+  return { ok: true, notes };
+}
+
 async function handleRequest(request, env) {
   if (request.method !== "POST") {
     return errorResponse("method not allowed", 405);
@@ -974,6 +1128,7 @@ async function handleRequest(request, env) {
     "/v1/rotate-token": "rotate_token",
     "/v1/clear-token": "clear_token",
     "/v1/destroy-broker": "destroy_broker",
+    "/v1/teardown-project": "teardown_project",
   };
   const operation = operationByRoute[route];
   if (!operation) {
@@ -1029,6 +1184,11 @@ async function handleRequest(request, env) {
   if (route === "/v1/destroy-broker") {
     return withAuthorizedRequest(request, env, "destroy_broker", body, async () =>
       jsonResponse(await destroyBroker(setupTokenValue, accountId, env)),
+    );
+  }
+  if (route === "/v1/teardown-project") {
+    return withAuthorizedRequest(request, env, "teardown_project", body, async () =>
+      jsonResponse(await teardownProject(setupTokenValue, accountId, body)),
     );
   }
 }

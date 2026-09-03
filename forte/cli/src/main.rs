@@ -59,8 +59,11 @@ async fn async_main() -> Result<()> {
             cli::deploy::run(project_dir).await?;
         }
 
-        Commands::Destroy { yes } => {
-            cli::destroy::run(".".into(), yes).await?;
+        Commands::Destroy {
+            yes,
+            delete_buckets,
+        } => {
+            cli::destroy::run(".".into(), yes, delete_buckets).await?;
         }
 
         Commands::Open { project, print } => {

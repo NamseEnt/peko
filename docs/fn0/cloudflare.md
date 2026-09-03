@@ -230,9 +230,21 @@ hostname immediately and visibly.
 
 ## Removing a project
 
-`forte destroy` empties fn0's buckets in your account but does not delete
-them — fn0 holds an object-scoped credential there by design. The buckets are
-yours to remove.
+`forte destroy` tears the project down on both sides. fn0's control plane
+removes the routing, the deployed bundles and static assets, the database, and
+empties the three R2 buckets. Through the setup broker it then removes the
+project's Cloudflare footprint: the app hostname's DNS record, the two public
+buckets' custom domains, the origin certificate, and the three minted
+R2/purge tokens.
+
+The three **buckets themselves are left standing** — empty. fn0 holds only
+object-scoped credentials there by design; deleting a bucket needs a token
+minted from the setup token, which only the broker can do. `forte destroy
+--delete-buckets` has the broker delete them once control has emptied them; a
+bucket teardown has not finished clearing is reported, and re-running is safe.
+
+An app DNS record you have edited (added an `A` record, turned the proxy off)
+is left in place and reported rather than deleted.
 
 ## Revoking
 

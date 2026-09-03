@@ -65,6 +65,11 @@ pub enum Commands {
     Destroy {
         #[arg(long)]
         yes: bool,
+        #[arg(
+            long,
+            help = "Also delete the project's now-empty R2 buckets, not just their contents"
+        )]
+        delete_buckets: bool,
     },
     /// Print the deployed app URL and open it in the browser
     Open {

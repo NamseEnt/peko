@@ -120,10 +120,12 @@ the broker.
 
 The broker is the only component that reads `FN0_SETUP_TOKEN` after bootstrap.
 It accepts fixed operations only: exact zone lookup, project resource
-provisioning, WebSockets, origin certificate issuance, domain finalization, and
-cleanup of credentials from a rejected connection. Every request forwards the
-Forte control credential to fn0-control, which verifies login and project
-ownership before the broker uses the setup token.
+provisioning, WebSockets, origin certificate issuance, domain finalization,
+cleanup of credentials from a rejected connection, and — for `forte destroy` —
+project teardown (removing the project's DNS record, bucket custom domains,
+origin certificate, and minted tokens, and optionally the emptied buckets).
+Every request forwards the Forte control credential to fn0-control, which
+verifies login and project ownership before the broker uses the setup token.
 
 The bootstrap credential is reusable across projects. Project credentials are
 created with only the permissions and resource scope required by each project.
