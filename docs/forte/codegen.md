@@ -161,7 +161,7 @@ For each action handler (`rs/src/actions/<name>.rs`), it generates:
 - `fe/src/actions/.generated/<name>.ts` — Zod schema and TypeScript types for `Input` and `Output`
 
 For each hook handler (`rs/src/hooks/<name>.rs`), it generates:
-- `fe/src/hooks/.generated/<CamelName>.ts` — Zod schema and TypeScript types for `Input` and `Output`, plus a React Suspense hook `use<CamelName>(input: Input): Output` backed by `useForteHook` from `@forte/react`
+- `fe/src/hooks/.generated/use<Name>.ts` — Zod schema and TypeScript types for `Input` and `Output`, plus a React Suspense hook `use<Name>(input: Input): Output` backed by `useForteHook` from `@forte/react`. The file name is `use` followed by the hook name with its first character uppercased and the rest unchanged (e.g., `user_session.rs` → `useUser_session.ts`, `session.rs` → `useSession.ts`).
 
 Each generated file imports `zod` and exports:
 ```ts

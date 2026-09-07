@@ -130,11 +130,11 @@ Key rules — same as actions:
 
 ### TypeScript client
 
-On the next `forte build` or `forte dev`, `forte-rs-to-ts` generates `fe/src/hooks/.generated/<CamelName>.ts` with a React Suspense hook:
+On the next `forte build` or `forte dev`, `forte-rs-to-ts` generates `fe/src/hooks/.generated/use<Name>.ts` with a React Suspense hook. The file name is `use` followed by the hook name with its first character uppercased — the rest of the name is kept as-is (underscores are not converted). For `user_session.rs` the generated file is `useUser_session.ts`:
 
 ```ts
-// fe/src/hooks/.generated/UserSession.ts (auto-generated)
-export function useUserSession(input: Input): Output {
+// fe/src/hooks/.generated/useUser_session.ts (auto-generated)
+export function useUser_session(input: Input): Output {
   return useForteHook("user_session", input, OutputSchema);
 }
 ```
@@ -142,10 +142,10 @@ export function useUserSession(input: Input): Output {
 Use it in a React component (requires a `<Suspense>` boundary):
 
 ```tsx
-import { useUserSession } from "../hooks/.generated/UserSession";
+import { useUser_session } from "../hooks/.generated/useUser_session";
 
 function ProfileCard() {
-  const session = useUserSession({ sessionToken: getCookie("session") });
+  const session = useUser_session({ sessionToken: getCookie("session") });
   if (session.t === "Unauthorized") return null;
   return <div>{session.name}</div>;
 }

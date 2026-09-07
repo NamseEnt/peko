@@ -131,6 +131,20 @@ delivery is uncertain. Forte does not retry automatically.
 See [WebSockets](websockets.md) for route callbacks, acceptance headers, limits, reconnect
 recovery, and `DisconnectCause` variants.
 
+## Static Page Cache
+
+`forte_sdk::static_page_cache` invalidates individual `#[cache_static]` pages at the edge:
+
+```rust
+use forte_sdk::static_page_cache;
+
+static_page_cache::purge(&["/episode/1", "/episodes"]).await?;
+```
+
+Paths are route paths as visitors request them (leading `/`, no query string or fragment). Returns once the invalidation is queued, not once the edge is consistent. Errors: `UnusablePath`, `RateLimited` (hourly budget shared with `object_storage::public` purges), `Transport`, `UnexpectedStatus`.
+
+See [pages.md](pages.md#invalidating-a-page-without-deploying) for constraints, percent-encoding rules, and the CLI equivalent (`forte purge-page`).
+
 ## Cookie Signing
 
 Signed, HMAC-SHA256 cookies. Requires `COOKIE_SECRET` env var.
