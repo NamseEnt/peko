@@ -63,6 +63,18 @@ Control stores every deployment's declarations under its `code_version`. Only de
 project's active code version are eligible for connection. This makes the receive path a deployment
 artifact instead of permanent configuration.
 
+After activation, `deploy_artifact_prune` also prunes these declaration documents, including empty
+declarations. It queries one project's configurations in pages and retains the active code version,
+every newer version that may still be uploading or awaiting activation, and the newest two versions
+below active. Older versions are deleted; a failed deployment becomes eligible once later active
+versions move it outside this retained history. If no later deployment activates, its configuration
+remains retained.
+
+Each deletion re-reads the manifest and the exact `(project_id, code_version)` document in one
+transaction. Cleanup stops if the project disappears, the active version changes, or activation is
+no longer `active`. Already-deleted documents are harmless on retry. Cleanup logs scanned, retained,
+and deleted document counts and does not change singleton runtime leases or ownership.
+
 When a worker adopts a new project code version, it closes every WebSocket for that project with
 `1012 Service Restart`. Control does not reconnect a persistent WebSocket from the previous
 deployment. It uses the declaration shipped with the active deployment, so a renamed handler either
