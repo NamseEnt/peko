@@ -124,6 +124,8 @@ provisioning, WebSockets, origin certificate issuance, domain finalization,
 cleanup of credentials from a rejected connection, and — for `forte destroy` —
 project teardown (removing the project's DNS record, bucket custom domains,
 origin certificate, and minted tokens, and optionally the emptied buckets).
+The app DNS record is removed only when it is still the single proxied CNAME
+pointing at fn0's origin; an owner-modified record is preserved and reported.
 Every request forwards the Forte control credential to fn0-control, which
 verifies login and project ownership before the broker uses the setup token.
 

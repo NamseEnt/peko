@@ -243,8 +243,8 @@ minted from the setup token, which only the broker can do. `forte destroy
 --delete-buckets` has the broker delete them once control has emptied them; a
 bucket teardown has not finished clearing is reported, and re-running is safe.
 
-An app DNS record you have edited (added an `A` record, turned the proxy off)
-is left in place and reported rather than deleted.
+An app DNS record you have edited (added an `A` record, turned the proxy off, or
+changed the CNAME target) is left in place and reported rather than deleted.
 
 ## Revoking
 

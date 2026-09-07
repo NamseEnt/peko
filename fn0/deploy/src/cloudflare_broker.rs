@@ -142,6 +142,7 @@ struct TeardownProjectInput<'a> {
     zone_id: &'a str,
     zone_name: &'a str,
     app_hostname: &'a str,
+    origin_hostname: Option<&'a str>,
     delete_buckets: bool,
 }
 
@@ -479,6 +480,7 @@ impl BrokerClient {
         zone_id: &str,
         zone_name: &str,
         app_hostname: &str,
+        origin_hostname: Option<&str>,
         delete_buckets: bool,
     ) -> Result<TeardownProjectOutcome> {
         self.post_json(
@@ -488,6 +490,7 @@ impl BrokerClient {
                 zone_id,
                 zone_name,
                 app_hostname,
+                origin_hostname,
                 delete_buckets,
             },
             true,
@@ -1672,6 +1675,7 @@ mod tests {
                 "zone_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
                 "zone_name": "example.com",
                 "app_hostname": "my-app.example.com",
+                "origin_hostname": "oci-ap-osaka-1-nlb.fn0.dev",
                 "delete_buckets": true,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1688,6 +1692,7 @@ mod tests {
                 "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
                 "example.com",
                 "my-app.example.com",
+                Some("oci-ap-osaka-1-nlb.fn0.dev"),
                 true,
             )
             .await
@@ -1713,6 +1718,7 @@ mod tests {
                 "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
                 "example.com",
                 "my-app.example.com",
+                None,
                 false,
             )
             .await

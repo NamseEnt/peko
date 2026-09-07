@@ -960,13 +960,16 @@ async function finalizeDomain(setupToken, accountId, body) {
   );
 }
 
-async function deleteAppDnsRecord(token, zoneId, appHostname) {
+async function deleteAppDnsRecord(token, zoneId, appHostname, originHostname) {
   const records = await dnsRecords(token, zoneId, appHostname);
   const resolving = records.filter((record) => ["A", "AAAA", "CNAME"].includes(record.type));
-  // `forte cloud init` only ever writes a single proxied CNAME on the project
-  // hostname, and refuses to run if an A/AAAA is already there. Anything else
-  // on this name was put there by the owner: leave it and report.
-  if (resolving.length === 1 && resolving[0].type === "CNAME" && resolving[0].proxied) {
+  if (
+    resolving.length === 1 &&
+    resolving[0].type === "CNAME" &&
+    resolving[0].proxied &&
+    originHostname &&
+    resolving[0].content === originHostname
+  ) {
     await cloudflareRequest(token, "DELETE", `/zones/${zoneId}/dns_records/${resolving[0].id}`);
     return null;
   }
@@ -1032,7 +1035,17 @@ async function revokeProjectCredentialsByName(setupToken, projectId) {
   }
   for (const token of seen) {
     if (wanted.has(token.name)) {
-      await revokeBestEffort(setupToken, token.id, wanted.get(token.name));
+      try {
+        await revokeToken(setupToken, token.id);
+      } catch (error) {
+        if (!isNotFound(error)) {
+          throw new Error(
+            `${wanted.get(token.name)} token cleanup failed: ${
+              error instanceof Error ? error.message : error
+            }`,
+          );
+        }
+      }
     }
   }
 }
@@ -1072,6 +1085,10 @@ async function teardownProject(setupToken, accountId, body) {
   const zoneId = ensureZoneId(ensureString(body.zone_id, "zone_id"));
   const zoneName = ensureHostname(ensureString(body.zone_name, "zone_name"));
   const appHostname = ensureHostname(ensureString(body.app_hostname, "app_hostname"));
+  const originHostname =
+    body.origin_hostname == null
+      ? null
+      : ensureHostname(ensureString(body.origin_hostname, "origin_hostname"));
   const deleteBuckets = body.delete_buckets === true;
   if (!appHostname.endsWith(`.${zoneName}`)) {
     throw new Error("app hostname does not belong to the selected zone");
@@ -1080,7 +1097,7 @@ async function teardownProject(setupToken, accountId, body) {
   const notes = [];
 
   await withProvisioning(setupToken, accountId, zoneId, `teardown ${projectId}`, async (token) => {
-    const dnsNote = await deleteAppDnsRecord(token, zoneId, appHostname);
+    const dnsNote = await deleteAppDnsRecord(token, zoneId, appHostname, originHostname);
     if (dnsNote) {
       notes.push(dnsNote);
     }

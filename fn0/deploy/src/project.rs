@@ -87,7 +87,7 @@ enum DeleteProject {
     InternalError,
 }
 
-pub async fn delete_project(project_id: &str) -> Result<()> {
+async fn request_delete_project(project_id: &str) -> Result<DeleteProject> {
     let creds = crate::credentials::require()?;
     let client = reqwest::Client::new();
     let url = format!(
@@ -102,7 +102,11 @@ pub async fn delete_project(project_id: &str) -> Result<()> {
         .await?
         .error_for_status()?;
     let raw: DeleteProject = resp.json().await?;
-    match raw {
+    Ok(raw)
+}
+
+pub async fn delete_project(project_id: &str) -> Result<()> {
+    match request_delete_project(project_id).await? {
         DeleteProject::Ok => Ok(()),
         DeleteProject::NotLoggedIn => {
             Err(anyhow!("control rejected token; run `fn0 login` again."))
@@ -110,6 +114,18 @@ pub async fn delete_project(project_id: &str) -> Result<()> {
         DeleteProject::NotFound => Err(anyhow!(
             "project '{project_id}' not found or not owned by you."
         )),
+        DeleteProject::InternalError => Err(anyhow!(
+            "delete_project: server error; check fn0-control logs"
+        )),
+    }
+}
+
+pub async fn delete_project_if_present(project_id: &str) -> Result<()> {
+    match request_delete_project(project_id).await? {
+        DeleteProject::Ok | DeleteProject::NotFound => Ok(()),
+        DeleteProject::NotLoggedIn => {
+            Err(anyhow!("control rejected token; run `fn0 login` again."))
+        }
         DeleteProject::InternalError => Err(anyhow!(
             "delete_project: server error; check fn0-control logs"
         )),

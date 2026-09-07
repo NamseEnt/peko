@@ -488,13 +488,15 @@ function teardownRequest(overrides = {}) {
     zone_id: TEARDOWN_ZONE_ID,
     zone_name: "example.com",
     app_hostname: TEARDOWN_APP_HOSTNAME,
+    origin_hostname: "oci-ap-osaka-1-nlb.fn0.dev",
     delete_buckets: false,
     ...overrides,
   });
 }
 
 function teardownProjectRoutes({
-  dnsRecordsResponds = () => jsonResponse(cf([{ id: "cname-id", type: "CNAME", proxied: true }])),
+  dnsRecordsResponds = () =>
+    jsonResponse(cf([{ id: "cname-id", type: "CNAME", content: "oci-ap-osaka-1-nlb.fn0.dev", proxied: true }])),
   certificatesResponds = () =>
     jsonResponse(cf([{ id: "cert-id", hostnames: [TEARDOWN_APP_HOSTNAME] }])),
   userTokensResponds = () =>
@@ -604,6 +606,49 @@ test("teardown-project leaves an app DNS record the owner has edited and reports
     calls.some((call) => call.method === "DELETE" && call.pathname.startsWith(`/zones/${TEARDOWN_ZONE_ID}/dns_records`)),
     false,
   );
+});
+
+test("teardown-project preserves a proxied CNAME with a different origin", async () => {
+  const routes = teardownProjectRoutes({
+    dnsRecordsResponds: () =>
+      jsonResponse(cf([{ id: "cname-id", type: "CNAME", content: "user-origin.example.net", proxied: true }])),
+  });
+
+  const { calls, result: response } = await withStubbedFetch(routes, () =>
+    worker.fetch(teardownRequest(), makeEnv()),
+  );
+
+  assert.equal(response.status, 200);
+  const { notes } = await response.json();
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /my-app\.example\.com/);
+  assert.equal(
+    calls.some(
+      (call) => call.method === "DELETE" && call.pathname === `/zones/${TEARDOWN_ZONE_ID}/dns_records/cname-id`,
+    ),
+    false,
+  );
+});
+
+test("teardown-project fails when a project token cannot be revoked", async () => {
+  const routes = teardownProjectRoutes({
+    userTokensResponds: () =>
+      jsonResponse(
+        cf([{ id: "w".repeat(32), name: `fn0 worker (${TEARDOWN_PROJECT_ID})` }]),
+      ),
+  });
+  routes.unshift(
+    route("DELETE", `/user/tokens/${"w".repeat(32)}`, "Bearer setup-token", () =>
+      jsonResponse(cfError("permission denied", 9100), 403),
+    ),
+  );
+
+  const { result: response } = await withStubbedFetch(routes, () =>
+    worker.fetch(teardownRequest(), makeEnv()),
+  );
+
+  assert.equal(response.status, 500);
+  assert.match(await response.text(), /token cleanup failed/);
 });
 
 // A missing certificate list (Origin CA never issued one, or already revoked)
