@@ -159,7 +159,7 @@ pub async fn lambda_invoke_async(args: LambdaInvokeArgs<'_>) -> anyhow::Result<(
     let resp = http::Client::new().send(request).await?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.into_body().bytes().await;
+        let body = resp.into_body().bytes().await?;
         anyhow::bail!(
             "lambda async invoke {}: {}",
             status,
@@ -221,7 +221,7 @@ pub async fn r2_delete_object(args: R2ObjectRef<'_>) -> anyhow::Result<()> {
     let resp = http::Client::new().send(request).await?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.into_body().bytes().await;
+        let body = resp.into_body().bytes().await?;
         anyhow::bail!("r2 delete {}: {}", status, String::from_utf8_lossy(&body));
     }
     Ok(())
@@ -297,7 +297,7 @@ pub async fn r2_list_objects(args: R2ListArgs<'_>) -> anyhow::Result<R2ListPage>
 
     let resp = http::Client::new().send(request).await?;
     let status = resp.status();
-    let body = resp.into_body().bytes().await;
+    let body = resp.into_body().bytes_limited(usize::MAX).await?;
     if !status.is_success() {
         anyhow::bail!("r2 list {}: {}", status, String::from_utf8_lossy(&body));
     }

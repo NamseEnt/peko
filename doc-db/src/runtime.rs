@@ -32,7 +32,7 @@ pub(crate) async fn http_post_json(
     if !response.status().is_success() {
         bail!("HTTP request failed with status: {}", response.status());
     }
-    let bytes = response.into_body().bytes().await;
+    let bytes = response.into_body().bytes_limited(usize::MAX).await?;
     Ok(bytes.to_vec())
 }
 

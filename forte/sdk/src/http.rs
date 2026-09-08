@@ -177,8 +177,8 @@ impl Body {
         Ok(Bytes::from(buffered))
     }
 
-    pub async fn bytes(self) -> Bytes {
-        self.bytes_limited(usize::MAX).await.unwrap_or_default()
+    pub async fn bytes(self) -> core::result::Result<Bytes, BodyError> {
+        self.bytes_limited(DEFAULT_BODY_BUFFER_LIMIT).await
     }
 
     pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T> {
@@ -399,5 +399,29 @@ fn convert_scheme(s: &str) -> p3::Scheme {
         "http" => p3::Scheme::Http,
         "https" => p3::Scheme::Https,
         other => p3::Scheme::Other(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Body, BodyError, DEFAULT_BODY_BUFFER_LIMIT};
+
+    #[test]
+    fn bytes_uses_the_default_buffer_limit() {
+        let body = Body::from(vec![0_u8; DEFAULT_BODY_BUFFER_LIMIT + 1]);
+        let error = futures::executor::block_on(body.bytes()).expect_err("body must be rejected");
+        assert!(matches!(
+            error,
+            BodyError::TooLarge {
+                limit: DEFAULT_BODY_BUFFER_LIMIT
+            }
+        ));
+    }
+
+    #[test]
+    fn bytes_returns_small_bodies() {
+        let body = Body::from("small body");
+        let bytes = futures::executor::block_on(body.bytes()).expect("body must be readable");
+        assert_eq!(bytes.as_ref(), b"small body");
     }
 }

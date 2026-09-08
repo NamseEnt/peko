@@ -34,6 +34,12 @@ applications may stream large bodies through compute when needed. Request and
 response streaming is implemented end to end; see the
 [HTTP body streaming design](../design/http-body-streaming.md).
 
+The unlimited response-body value is a size limit, not a time allowance. A
+response streams under backpressure within the same 15-second duration, so a
+client that cannot read the whole body before the deadline has its response cut
+off. Serve downloads that need longer than that from object storage instead of
+through compute.
+
 The first request to reach a cold JavaScript instance runs on a much larger
 allowance, because it also pays for module instantiation and the renderer's
 first uncompiled pass — work later requests inherit for free. Requests that

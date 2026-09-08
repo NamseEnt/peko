@@ -5,7 +5,7 @@ use http_body_util::Empty;
 use hyper::header::{CONNECTION, HOST, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use hyper::{Method, Request};
 use std::future::Future;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Duration;
@@ -354,6 +354,49 @@ pub async fn handler(_req: ForteRequest<'_>) -> Result<Props> {
 }
 "#;
 
+const RAW_REQUEST_STREAM_API: &str = r#"
+use anyhow::Result;
+use forte_sdk::http::{Body, Response};
+use forte_sdk::{ForteRequest, ForteResponse};
+
+pub type Props = ForteResponse;
+
+pub async fn handler(req: ForteRequest<'_>) -> Result<Props> {
+    let mut body = req.body;
+    let mut received = 0_u64;
+    let mut largest_chunk = 0_usize;
+    while let Some(chunk) = body.read_chunk().await? {
+        received += chunk.len() as u64;
+        largest_chunk = largest_chunk.max(chunk.len());
+    }
+    Ok(Response::builder()
+        .status(200)
+        .body(Body::from(format!("{received}:{largest_chunk}")))?)
+}
+"#;
+
+const RAW_LARGE_RESPONSE_STREAM_API: &str = r#"
+use anyhow::Result;
+use forte_sdk::http::{Body, Response};
+use forte_sdk::{ForteRequest, ForteResponse};
+
+pub type Props = ForteResponse;
+
+pub async fn handler(_req: ForteRequest<'_>) -> Result<Props> {
+    let (mut writer, body) = Body::channel();
+    forte_sdk::runtime::spawn(async move {
+        for _chunk_index in 0..256 {
+            let leftover = writer.write_all(vec![b'x'; 64 * 1024]).await;
+            if !leftover.is_empty() {
+                break;
+            }
+        }
+        drop(writer);
+    });
+    Ok(Response::builder().status(200).body(body)?)
+}
+"#;
+
 #[test]
 fn test_dev_raw_response_api() {
     let _dev_server_slot = take_the_only_dev_server_slot();
@@ -366,6 +409,12 @@ fn test_dev_raw_response_api() {
     std::fs::create_dir_all(&apis_dir).unwrap();
     std::fs::write(apis_dir.join("webhook.rs"), RAW_RESPONSE_WEBHOOK_API).unwrap();
     std::fs::write(apis_dir.join("stream.rs"), RAW_RESPONSE_STREAM_API).unwrap();
+    std::fs::write(apis_dir.join("upload.rs"), RAW_REQUEST_STREAM_API).unwrap();
+    std::fs::write(
+        apis_dir.join("large_stream.rs"),
+        RAW_LARGE_RESPONSE_STREAM_API,
+    )
+    .unwrap();
 
     let server = DevServer::start(&project_dir);
 
@@ -404,6 +453,31 @@ fn test_dev_raw_response_api() {
         .unwrap();
     assert_eq!(streamed.status().as_u16(), 200);
     assert_eq!(streamed.text().unwrap(), "hello stream");
+
+    let upload_size = 100_u64 * 1024 * 1024 - 64 * 1024;
+    let upload = std::io::repeat(0).take(upload_size);
+    let uploaded = client
+        .post(format!("{}/api/upload", server.url()))
+        .body(reqwest::blocking::Body::new(upload))
+        .send()
+        .unwrap();
+    assert_eq!(uploaded.status().as_u16(), 200);
+    let upload_result = uploaded.text().unwrap();
+    let (received, largest_chunk) = upload_result
+        .split_once(':')
+        .expect("upload response must contain size and largest chunk");
+    assert_eq!(received.parse::<u64>().unwrap(), upload_size);
+    let largest_chunk = largest_chunk.parse::<usize>().unwrap();
+    assert!(largest_chunk > 0);
+    assert!(largest_chunk <= 64 * 1024);
+
+    let mut large_stream = client
+        .get(format!("{}/api/large_stream", server.url()))
+        .send()
+        .unwrap();
+    assert_eq!(large_stream.status().as_u16(), 200);
+    let streamed_size = large_stream.copy_to(&mut std::io::sink()).unwrap();
+    assert_eq!(streamed_size, 16_u64 * 1024 * 1024);
 }
 
 fn vite_ssr_server_running(project_dir: &std::path::Path) -> bool {

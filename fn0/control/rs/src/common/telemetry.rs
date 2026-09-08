@@ -333,7 +333,7 @@ impl TelemetryClient {
             .body(Vec::new())?;
         let resp = http::Client::new().send(req).await?;
         let status = resp.status().as_u16();
-        let body = resp.into_body().bytes().await.to_vec();
+        let body = resp.into_body().bytes_limited(usize::MAX).await?.to_vec();
         if !(200..300).contains(&status) {
             anyhow::bail!(
                 "loggytracy {path} failed (status={status}): {}",

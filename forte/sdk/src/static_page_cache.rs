@@ -79,10 +79,12 @@ pub async fn purge(paths: &[&str]) -> Result<()> {
         return Ok(());
     }
 
-    let message = String::from_utf8_lossy(&response.into_body().bytes().await)
-        .chars()
-        .take(512)
-        .collect();
+    let body = response
+        .into_body()
+        .bytes()
+        .await
+        .map_err(|error| Error::Transport(error.to_string()))?;
+    let message = String::from_utf8_lossy(&body).chars().take(512).collect();
     match status {
         StatusCode::BAD_REQUEST => Err(Error::UnusablePath(message)),
         StatusCode::TOO_MANY_REQUESTS => Err(Error::RateLimited),

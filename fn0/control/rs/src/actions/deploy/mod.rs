@@ -410,7 +410,7 @@ async fn ensure_turso_database(project_id: &str) -> anyhow::Result<()> {
         .body(body)?;
     let resp = http::Client::new().send(req).await?;
     let status = resp.status().as_u16();
-    let body_bytes = resp.into_body().bytes().await.to_vec();
+    let body_bytes = resp.into_body().bytes().await?.to_vec();
     if (200..300).contains(&status) || status == 409 || database_already_exists(&body_bytes) {
         return Ok(());
     }

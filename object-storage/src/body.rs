@@ -33,7 +33,10 @@ impl Body {
         match self.0 {
             Inner::Bytes(bytes) => Ok(bytes),
             #[cfg(target_arch = "wasm32")]
-            Inner::Stream(body) => Ok(body.bytes().await),
+            Inner::Stream(body) => body
+                .bytes_limited(usize::MAX)
+                .await
+                .map_err(|error| crate::Error::Transport(error.to_string())),
             #[cfg(not(target_arch = "wasm32"))]
             Inner::Stream(response) => response
                 .bytes()

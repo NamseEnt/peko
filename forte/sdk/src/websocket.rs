@@ -255,7 +255,12 @@ pub async fn connect(
         .map_err(|_| WebSocketConnectError::Transport)?;
     match response.status() {
         StatusCode::CREATED => {
-            let connection_id = String::from_utf8(response.into_body().bytes().await.to_vec())
+            let connection_id = response
+                .into_body()
+                .bytes()
+                .await
+                .map_err(|_| WebSocketConnectError::Transport)?;
+            let connection_id = String::from_utf8(connection_id.to_vec())
                 .map_err(|_| WebSocketConnectError::Internal)?;
             if connection_id.is_empty() {
                 return Err(WebSocketConnectError::Internal);
@@ -338,7 +343,12 @@ pub async fn connect_singleton(
         .map_err(|_| WebSocketConnectError::Transport)?;
     match response.status() {
         StatusCode::CREATED => {
-            let connection_id = String::from_utf8(response.into_body().bytes().await.to_vec())
+            let connection_id = response
+                .into_body()
+                .bytes()
+                .await
+                .map_err(|_| WebSocketConnectError::Transport)?;
+            let connection_id = String::from_utf8(connection_id.to_vec())
                 .map_err(|_| WebSocketConnectError::Internal)?;
             if connection_id.is_empty() {
                 return Err(WebSocketConnectError::Internal);

@@ -355,7 +355,7 @@ async fn invoke_singleton_connect(
             response.status()
         );
     }
-    let body = response.into_body().bytes().await;
+    let body = response.into_body().bytes().await?;
     Ok(serde_json::from_slice(&body)?)
 }
 

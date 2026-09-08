@@ -25,7 +25,9 @@ The following limits apply independently:
 A request within the body-size limit can still fail because it exceeds memory,
 CPU time, or wall time. In particular, buffering a large body or materializing a
 large JSON value can exhaust the 128 MB WASM memory limit. Slow uploads can
-exceed the 15-second wall-time limit.
+exceed the 15-second wall-time limit, and so can slow downloads: the response
+stream shares the same deadline, so an unlimited response size does not mean
+unlimited delivery time.
 
 Presigned object-storage URLs are the recommended path for durable file uploads.
 They are not required: applications must remain able to stream large HTTP bodies

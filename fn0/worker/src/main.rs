@@ -61,6 +61,8 @@ const CONTROL_DEPLOY_STATUS_DEADLINE: std::time::Duration = std::time::Duration:
 const REQUEST_BODY_CHUNK_SIZE: usize = 64 * 1024;
 const AGGREGATE_REQUEST_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const MAX_CONNECTION_BUFFER_SIZE: usize = 128 * 1024;
+const REQUEST_BODY_BUFFER_PERMITS: u32 =
+    (MAX_CONNECTION_BUFFER_SIZE / REQUEST_BODY_CHUNK_SIZE) as u32;
 
 fn select_request_deadline(project_id: &str, request_path: &str) -> std::time::Duration {
     if project_id == CONTROL_PROJECT_ID && request_path == DEPLOY_STATUS_PATH {
@@ -711,8 +713,12 @@ fn full_body(body_bytes: Bytes) -> fn0::Body {
         .boxed_unsync()
 }
 
-struct LimitedRequestBody {
-    inner: hyper::body::Incoming,
+type BodyBudgetPermitFuture =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, tokio::sync::AcquireError>> + Send>>;
+
+struct LimitedRequestBody<InnerBody> {
+    inner: InnerBody,
+    limit: u64,
     received: u64,
     stopped: bool,
     pending_data: Option<Bytes>,
@@ -720,24 +726,35 @@ struct LimitedRequestBody {
     cancellation: CancellationToken,
     stream_budget: Arc<Semaphore>,
     budget_permit: Option<OwnedSemaphorePermit>,
-    budget_waiter: Option<
-        Pin<
-            Box<
-                dyn Future<Output = Result<OwnedSemaphorePermit, tokio::sync::AcquireError>> + Send,
-            >,
-        >,
-    >,
+    budget_waiter: Option<BodyBudgetPermitFuture>,
 }
 
-impl LimitedRequestBody {
+impl<InnerBody> LimitedRequestBody<InnerBody> {
     fn new(
-        inner: hyper::body::Incoming,
+        inner: InnerBody,
+        stream_budget: Arc<Semaphore>,
+        too_large: Arc<AtomicBool>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self::with_limit(
+            inner,
+            MAX_REQUEST_BODY_SIZE,
+            stream_budget,
+            too_large,
+            cancellation,
+        )
+    }
+
+    fn with_limit(
+        inner: InnerBody,
+        limit: u64,
         stream_budget: Arc<Semaphore>,
         too_large: Arc<AtomicBool>,
         cancellation: CancellationToken,
     ) -> Self {
         Self {
             inner,
+            limit,
             received: 0,
             stopped: false,
             pending_data: None,
@@ -750,7 +767,11 @@ impl LimitedRequestBody {
     }
 }
 
-impl http_body::Body for LimitedRequestBody {
+impl<InnerBody> http_body::Body for LimitedRequestBody<InnerBody>
+where
+    InnerBody: http_body::Body<Data = Bytes> + Unpin,
+    InnerBody::Error: std::error::Error + Send + Sync + 'static,
+{
     type Data = Bytes;
     type Error = anyhow::Error;
 
@@ -764,7 +785,11 @@ impl http_body::Body for LimitedRequestBody {
 
         self.budget_permit.take();
         if self.budget_waiter.is_none() {
-            self.budget_waiter = Some(Box::pin(self.stream_budget.clone().acquire_owned()));
+            self.budget_waiter = Some(Box::pin(
+                self.stream_budget
+                    .clone()
+                    .acquire_many_owned(REQUEST_BODY_BUFFER_PERMITS),
+            ));
         }
         let budget_result = self
             .budget_waiter
@@ -777,6 +802,7 @@ impl http_body::Body for LimitedRequestBody {
             Poll::Ready(Ok(budget_permit)) => budget_permit,
             Poll::Ready(Err(error)) => {
                 self.stopped = true;
+                self.budget_permit = None;
                 return Poll::Ready(Some(Err(anyhow::Error::new(error))));
             }
         };
@@ -796,16 +822,18 @@ impl http_body::Body for LimitedRequestBody {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(frame))) => {
                 let Some(data) = frame.data_ref() else {
+                    self.budget_permit = None;
                     return Poll::Ready(Some(Ok(frame)));
                 };
                 let data_length = data.len() as u64;
                 let received = self.received.saturating_add(data_length);
-                if received > MAX_REQUEST_BODY_SIZE {
+                if received > self.limit {
                     self.stopped = true;
                     self.too_large.store(true, Ordering::Release);
                     self.cancellation.cancel();
+                    self.budget_permit = None;
                     return Poll::Ready(Some(Err(anyhow::Error::new(RequestBodyTooLarge {
-                        limit: MAX_REQUEST_BODY_SIZE,
+                        limit: self.limit,
                     }))));
                 }
                 self.received = received;
@@ -822,10 +850,12 @@ impl http_body::Body for LimitedRequestBody {
             Poll::Ready(Some(Err(error))) => {
                 self.stopped = true;
                 self.cancellation.cancel();
+                self.budget_permit = None;
                 Poll::Ready(Some(Err(anyhow::Error::new(error))))
             }
             Poll::Ready(None) => {
                 self.stopped = true;
+                self.budget_permit = None;
                 Poll::Ready(None)
             }
         }
@@ -837,7 +867,7 @@ impl http_body::Body for LimitedRequestBody {
 
     fn size_hint(&self) -> http_body::SizeHint {
         let mut hint = self.inner.size_hint();
-        let remaining = MAX_REQUEST_BODY_SIZE.saturating_sub(self.received);
+        let remaining = self.limit.saturating_sub(self.received);
         hint.set_lower(hint.lower().min(remaining));
         if let Some(upper) = hint.upper() {
             hint.set_upper(upper.min(remaining));
@@ -875,14 +905,21 @@ struct CancellationBody {
     inner: fn0::Body,
     token: Option<CancellationToken>,
     _in_flight_guard: Option<InFlightGuard>,
+    deadline: Pin<Box<tokio::time::Sleep>>,
 }
 
 impl CancellationBody {
-    fn new(inner: fn0::Body, token: CancellationToken, in_flight: InFlightGuard) -> Self {
+    fn new(
+        inner: fn0::Body,
+        token: CancellationToken,
+        in_flight: InFlightGuard,
+        deadline: tokio::time::Instant,
+    ) -> Self {
         Self {
             inner,
             token: Some(token),
             _in_flight_guard: Some(in_flight),
+            deadline: Box::pin(tokio::time::sleep_until(deadline)),
         }
     }
 
@@ -907,6 +944,15 @@ impl http_body::Body for CancellationBody {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        if self.token.is_none() {
+            return Poll::Ready(None);
+        }
+        if self.deadline.as_mut().poll(context).is_ready() {
+            self.cancel();
+            return Poll::Ready(Some(Err(anyhow::anyhow!(
+                "request execution deadline exceeded"
+            ))));
+        }
         match Pin::new(&mut self.inner).poll_frame(context) {
             Poll::Ready(None) => {
                 self.cancel();
@@ -917,7 +963,7 @@ impl http_body::Body for CancellationBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.token.is_none() || self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
@@ -1242,6 +1288,7 @@ async fn handle_user_request(
 
     let (resp_tx, resp_rx) = oneshot::channel();
     let selected_request_deadline = select_request_deadline(&project_id, &request_path);
+    let request_deadline = tokio::time::Instant::now() + selected_request_deadline;
     let envelope = RequestEnvelope::new(project_id.clone(), mapped_req, resp_tx)
         .with_execution_deadline(selected_request_deadline);
 
@@ -1264,7 +1311,7 @@ async fn handle_user_request(
         }
     }
 
-    let run_result = match tokio::time::timeout(selected_request_deadline, resp_rx).await {
+    let run_result = match tokio::time::timeout_at(request_deadline, resp_rx).await {
         Ok(Ok(r)) => r,
         Ok(Err(_)) => {
             tracing::error!(%project_id, "worker dropped response channel");
@@ -1295,9 +1342,13 @@ async fn handle_user_request(
             }
             let (parts, body) = resp.into_parts();
             cancellation_guard.disarm();
-            let response_body =
-                UnsyncBoxBody::new(CancellationBody::new(body, cancellation, in_flight_guard))
-                    .boxed_unsync();
+            let response_body = UnsyncBoxBody::new(CancellationBody::new(
+                body,
+                cancellation,
+                in_flight_guard,
+                request_deadline,
+            ))
+            .boxed_unsync();
             Ok(hyper::Response::from_parts(parts, response_body))
         }
         Err(err) => {
@@ -1346,10 +1397,22 @@ async fn handle_user_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_DEPLOY_STATUS_DEADLINE, DEPLOY_STATUS_PATH, MAX_REQUEST_BODY_SIZE,
-        REQUEST_DEADLINE, declared_request_body_exceeds_limit, select_request_deadline,
+        CONTROL_DEPLOY_STATUS_DEADLINE, CancellationBody, CancellationGuard, DEPLOY_STATUS_PATH,
+        InFlightGuard, LimitedRequestBody, MAX_REQUEST_BODY_SIZE, REQUEST_BODY_BUFFER_PERMITS,
+        REQUEST_BODY_CHUNK_SIZE, REQUEST_DEADLINE, declared_request_body_exceeds_limit,
+        select_request_deadline,
     };
+    use bytes::Bytes;
+    use futures::{StreamExt, stream};
+    use http_body::Frame;
+    use http_body_util::{BodyExt, StreamBody};
     use hyper::HeaderMap;
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn deploy_status_gets_extended_deadline_only_for_control_project() {
@@ -1380,5 +1443,214 @@ mod tests {
             (MAX_REQUEST_BODY_SIZE + 1).to_string().parse().unwrap(),
         );
         assert!(declared_request_body_exceeds_limit(&headers));
+    }
+
+    #[tokio::test]
+    async fn received_bytes_over_the_limit_cancel_the_request() {
+        let inner = StreamBody::new(stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"1234"))),
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"56789"))),
+        ]));
+        let too_large = Arc::new(AtomicBool::new(false));
+        let cancellation = CancellationToken::new();
+        let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUFFER_PERMITS as usize));
+        let mut body = LimitedRequestBody::with_limit(
+            inner,
+            8,
+            budget,
+            too_large.clone(),
+            cancellation.clone(),
+        );
+
+        let first = body
+            .frame()
+            .await
+            .expect("first frame")
+            .expect("first frame must succeed")
+            .into_data()
+            .expect("first frame must contain data");
+        assert_eq!(first.as_ref(), b"1234");
+        let error = body
+            .frame()
+            .await
+            .expect("limit error frame")
+            .expect_err("second frame must exceed the limit");
+        let limit_error = error
+            .downcast_ref::<fn0::RequestBodyTooLarge>()
+            .expect("typed limit error");
+        assert_eq!(limit_error.limit, 8);
+        assert!(too_large.load(Ordering::Acquire));
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_cancels_body_delivery() {
+        let inner = StreamBody::new(stream::iter([Err::<Frame<Bytes>, _>(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "client disconnected",
+        ))]));
+        let cancellation = CancellationToken::new();
+        let mut body = LimitedRequestBody::new(
+            inner,
+            Arc::new(Semaphore::new(REQUEST_BODY_BUFFER_PERMITS as usize)),
+            Arc::new(AtomicBool::new(false)),
+            cancellation.clone(),
+        );
+
+        body.frame()
+            .await
+            .expect("disconnect error frame")
+            .expect_err("disconnect must fail body delivery");
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn near_limit_stream_is_consumed_one_chunk_at_a_time() {
+        let chunk_count = MAX_REQUEST_BODY_SIZE as usize / REQUEST_BODY_CHUNK_SIZE;
+        let chunks = (0..chunk_count).map(|_| {
+            Ok::<_, Infallible>(Frame::data(Bytes::from(vec![
+                0_u8;
+                REQUEST_BODY_CHUNK_SIZE
+            ])))
+        });
+        let inner = StreamBody::new(stream::iter(chunks));
+        let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUFFER_PERMITS as usize));
+        let mut body = LimitedRequestBody::new(
+            inner,
+            budget,
+            Arc::new(AtomicBool::new(false)),
+            CancellationToken::new(),
+        );
+        let mut received = 0_u64;
+        let mut largest_chunk = 0_usize;
+
+        while let Some(frame) = body.frame().await {
+            let data = frame
+                .expect("stream frame must succeed")
+                .into_data()
+                .expect("stream frame must contain data");
+            received += data.len() as u64;
+            largest_chunk = largest_chunk.max(data.len());
+        }
+
+        assert_eq!(received, MAX_REQUEST_BODY_SIZE);
+        assert_eq!(largest_chunk, REQUEST_BODY_CHUNK_SIZE);
+    }
+
+    #[tokio::test]
+    async fn concurrent_streams_wait_for_the_aggregate_budget() {
+        let budget = Arc::new(Semaphore::new((REQUEST_BODY_BUFFER_PERMITS * 2) as usize));
+        let make_body = || {
+            let inner = StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"chunk"),
+            ))]));
+            LimitedRequestBody::new(
+                inner,
+                budget.clone(),
+                Arc::new(AtomicBool::new(false)),
+                CancellationToken::new(),
+            )
+        };
+        let mut first_body = make_body();
+        let mut second_body = make_body();
+        let mut waiting_body = make_body();
+
+        first_body
+            .frame()
+            .await
+            .expect("first body frame")
+            .expect("first body frame must succeed");
+        second_body
+            .frame()
+            .await
+            .expect("second body frame")
+            .expect("second body frame must succeed");
+        assert_eq!(budget.available_permits(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), waiting_body.frame())
+                .await
+                .is_err()
+        );
+
+        drop(first_body);
+        waiting_body
+            .frame()
+            .await
+            .expect("waiting body frame")
+            .expect("waiting body frame must succeed");
+    }
+
+    #[tokio::test]
+    async fn response_body_delivers_before_the_stream_finishes() {
+        let (sender, receiver) = futures::channel::mpsc::unbounded::<Bytes>();
+        let stream = receiver.map(|chunk| Ok::<_, anyhow::Error>(Frame::data(chunk)));
+        let inner = StreamBody::new(stream).boxed_unsync();
+        let cancellation = CancellationToken::new();
+        let in_flight_count = Arc::new(AtomicU64::new(0));
+        let in_flight = InFlightGuard::new(in_flight_count.clone());
+        let mut body = CancellationBody::new(
+            inner,
+            cancellation.clone(),
+            in_flight,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+
+        sender
+            .unbounded_send(Bytes::from_static(b"first"))
+            .expect("first response chunk must send");
+        let first = tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .expect("first response chunk must arrive before stream completion")
+            .expect("first response frame")
+            .expect("first response frame must succeed")
+            .into_data()
+            .expect("first response frame must contain data");
+        assert_eq!(first.as_ref(), b"first");
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(in_flight_count.load(Ordering::Relaxed), 1);
+
+        drop(body);
+        assert!(cancellation.is_cancelled());
+        assert_eq!(in_flight_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn response_stream_stops_at_the_request_deadline() {
+        let (_sender, receiver) = futures::channel::mpsc::unbounded::<Bytes>();
+        let stream = receiver.map(|chunk| Ok::<_, anyhow::Error>(Frame::data(chunk)));
+        let inner = StreamBody::new(stream).boxed_unsync();
+        let cancellation = CancellationToken::new();
+        let in_flight_count = Arc::new(AtomicU64::new(0));
+        let in_flight = InFlightGuard::new(in_flight_count.clone());
+        let mut body = CancellationBody::new(
+            inner,
+            cancellation.clone(),
+            in_flight,
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        );
+
+        body.frame()
+            .await
+            .expect("deadline error frame")
+            .expect_err("response stream must stop at its deadline");
+        assert!(cancellation.is_cancelled());
+        assert_eq!(in_flight_count.load(Ordering::Relaxed), 1);
+        drop(body);
+        assert_eq!(in_flight_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn deadline_drop_cancels_associated_work() {
+        assert_eq!(REQUEST_DEADLINE, Duration::from_secs(15));
+        let cancellation = CancellationToken::new();
+        let future_cancellation = cancellation.clone();
+        let result = tokio::time::timeout(Duration::from_millis(10), async move {
+            let _guard = CancellationGuard::new(future_cancellation);
+            futures::future::pending::<()>().await;
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(cancellation.is_cancelled());
     }
 }

@@ -73,7 +73,7 @@ impl CloudflareClient {
             .body(body)?;
         let resp = http::Client::new().send(req).await?;
         let status = resp.status().as_u16();
-        let body = resp.into_body().bytes().await.to_vec();
+        let body = resp.into_body().bytes().await?.to_vec();
         Ok((status, body))
     }
 

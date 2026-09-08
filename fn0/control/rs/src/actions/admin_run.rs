@@ -147,7 +147,14 @@ pub async fn handler(req: ForteRequest<'_, Input>) -> Output {
         .get("content-type")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let body_bytes = response.into_body().bytes().await;
+    let body_bytes = match response.into_body().bytes_limited(usize::MAX).await {
+        Ok(body_bytes) => body_bytes,
+        Err(error) => {
+            return Output::InternalError {
+                reason: format!("read upstream body: {error}"),
+            };
+        }
+    };
     let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
     if (200..300).contains(&status) {

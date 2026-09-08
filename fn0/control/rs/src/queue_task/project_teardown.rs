@@ -177,7 +177,7 @@ async fn delete_turso_database(project_id: &str) -> anyhow::Result<()> {
     if (200..300).contains(&status) || status == 404 {
         return Ok(());
     }
-    let body_bytes = resp.into_body().bytes().await.to_vec();
+    let body_bytes = resp.into_body().bytes().await?.to_vec();
     anyhow::bail!(
         "turso delete_database {project_id} failed (status={status}): {}",
         String::from_utf8_lossy(&body_bytes)

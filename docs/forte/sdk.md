@@ -44,7 +44,7 @@ impl Body {
     pub fn empty() -> Self;
     pub fn channel() -> (StreamWriter<u8>, Body);
     pub async fn read_chunk(&mut self) -> Result<Option<Bytes>, BodyError>;
-    pub async fn bytes(self) -> Bytes;
+    pub async fn bytes(self) -> Result<Bytes, BodyError>;
     pub async fn bytes_limited(self, limit: usize) -> Result<Bytes, BodyError>;
     pub async fn text(self) -> Result<String>;
     pub async fn text_limited(self, limit: usize) -> Result<String>;
@@ -62,8 +62,9 @@ buffer-limit overflow, WASI transport errors, cancellation, and invalid UTF-8.
 `read_chunk` is single-consumer and backpressured. Each request chunk is at most 64 KiB;
 dropped or unread bodies cancel delivery. `bytes_limited`, `text_limited`, `json_limited`, and
 `form_limited` stop with an error when their explicit buffer limit is exceeded. The default
-buffered limit used by `json`, `text`, and `form` is 1 MiB. `bytes` is retained for compatibility
-and can collect an unbounded body, so use `bytes_limited` for request data.
+buffered limit used by `bytes`, `json`, `text`, and `form` is 1 MiB. That default applies to
+outbound client-response bodies as well as incoming request bodies, so reading a large upstream
+response needs `bytes_limited(usize::MAX)` or another explicit bound.
 
 Generated page and API handlers receive the streaming body in `req.body`. `raw_body` remains a
 legacy slice and is empty for those streaming handlers. Generated actions and hooks buffer their
@@ -110,7 +111,7 @@ let req = Request::builder()
 
 let resp = client.send(req).await?;
 let status = resp.status();
-let body = resp.into_body().bytes().await;
+let body = resp.into_body().bytes().await?;
 
 // Or deserialize the JSON response body directly:
 let data: MyType = resp.into_body().json::<MyType>().await?;
