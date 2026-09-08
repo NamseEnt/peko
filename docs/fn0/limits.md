@@ -30,10 +30,9 @@ buffering allowance. Request and response bodies must remain backpressured
 streams end to end. Buffering a body is still subject to the 128 MB application
 memory limit, and every request remains subject to the CPU and duration limits.
 Presigned object-storage URLs are recommended for durable file uploads, but
-applications may stream large bodies through compute when needed. This contract
-is approved but not yet implemented; see the
-[HTTP body streaming design](../design/http-body-streaming.md) and
-[GitHub issue #108](https://github.com/NamseEnt/fn0/issues/108).
+applications may stream large bodies through compute when needed. Request and
+response streaming is implemented end to end; see the
+[HTTP body streaming design](../design/http-body-streaming.md).
 
 The first request to reach a cold JavaScript instance runs on a much larger
 allowance, because it also pays for module instantiation and the renderer's

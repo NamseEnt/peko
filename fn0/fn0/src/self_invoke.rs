@@ -34,6 +34,7 @@ use wasmtime_wasi_http::p3::{RequestOptions, WasiHttpHooks, default_send_request
 tokio::task_local! {
     pub(crate) static SELF_HOST: String;
     pub(crate) static INVOCATION_DEADLINE: std::time::Instant;
+    pub(crate) static INVOCATION_CANCELLATION: tokio_util::sync::CancellationToken;
 }
 
 // Inject a request into the wasm instance loop (same project) and await its
@@ -46,7 +47,13 @@ async fn inject_and_await(
     req: Request,
 ) -> Result<Response> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    if sender.send((req, resp_tx)).is_err() {
+    let cancellation = INVOCATION_CANCELLATION
+        .try_with(|token| token.clone())
+        .unwrap_or_else(|_| tokio_util::sync::CancellationToken::new());
+    if sender
+        .send(WasmInjectEnvelope::new(req, resp_tx, cancellation))
+        .is_err()
+    {
         return Err(anyhow!("self-invoke target wasm instance channel closed"));
     }
     resp_rx

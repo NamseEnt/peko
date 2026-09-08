@@ -1,12 +1,10 @@
 use std::fmt;
 use std::future::Future;
 
-use tracing::Instrument;
-use wit_bindgen::rt::async_support::StreamReader;
-
 use crate::bindings::wasi::http::types as p3;
 use crate::bindings::{wit_future, wit_stream};
 use crate::http::Body;
+use tracing::Instrument;
 
 #[derive(Debug)]
 pub enum ServeError {
@@ -42,7 +40,7 @@ pub async fn serve<F, Fut, E>(
     dispatch: F,
 ) -> core::result::Result<p3::Response, p3::ErrorCode>
 where
-    F: FnOnce(::http::Request<Vec<u8>>) -> Fut,
+    F: FnOnce(::http::Request<Body>) -> Fut,
     Fut: Future<Output = core::result::Result<::http::Response<Body>, E>>,
     E: fmt::Debug,
 {
@@ -68,7 +66,16 @@ where
         Err(e) => {
             tracing::error!(error = ?e, "dispatch failed");
             crate::metrics::flush();
-            return Err(p3::ErrorCode::InternalError(Some(format!("{e:#?}"))));
+            let error_message = format!("{e:#?}");
+            if error_message.contains("request body exceeds") {
+                return Err(p3::ErrorCode::HttpRequestBodySize(Some(
+                    crate::http::DEFAULT_BODY_BUFFER_LIMIT as u64,
+                )));
+            }
+            if error_message.contains("HttpRequestBodySize") {
+                return Err(p3::ErrorCode::HttpRequestBodySize(None));
+            }
+            return Err(p3::ErrorCode::InternalError(Some(error_message)));
         }
     };
 
@@ -82,7 +89,7 @@ where
 
 async fn p3_to_http_request(
     req: p3::Request,
-) -> core::result::Result<::http::Request<Vec<u8>>, ServeError> {
+) -> core::result::Result<::http::Request<Body>, ServeError> {
     let method = method_from_p3(req.get_method());
 
     let scheme_str = match req.get_scheme() {
@@ -120,10 +127,11 @@ async fn p3_to_http_request(
     crate::runtime::spawn(async move {
         drop(trailers_writer);
     });
-    let (body_stream, _resp_trailers) = p3::Request::consume_body(req, trailers_reader);
-    let body_bytes: Vec<u8> = collect_stream(body_stream).await;
+    let (body_stream, body_trailers) = p3::Request::consume_body(req, trailers_reader);
 
-    builder.body(body_bytes).map_err(ServeError::BuildRequest)
+    builder
+        .body(Body::incoming(body_stream, body_trailers))
+        .map_err(ServeError::BuildRequest)
 }
 
 async fn http_response_to_p3(
@@ -150,6 +158,7 @@ async fn http_response_to_p3(
             Some(reader)
         }
         Body::Stream(reader) => Some(reader),
+        Body::Incoming { reader, .. } => Some(reader),
     };
 
     let (trailers_writer, trailers_reader) =
@@ -164,10 +173,6 @@ async fn http_response_to_p3(
         .map_err(|_| ServeError::InvalidStatusCode)?;
 
     Ok(wasi_resp)
-}
-
-async fn collect_stream(stream: StreamReader<u8>) -> Vec<u8> {
-    stream.collect().await
 }
 
 fn method_from_p3(m: p3::Method) -> ::http::Method {

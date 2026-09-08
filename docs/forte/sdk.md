@@ -7,13 +7,13 @@
 The request context passed to page and action handlers.
 
 ```rust
-pub struct ForteRequest<'a, Body = ()> {
+pub struct ForteRequest<'a, Body = forte_sdk::http::Body> {
     pub uri_authority: &'a str,       // host:port, e.g. "example.com"
     pub method: &'a http::Method,
     pub headers: &'a http::HeaderMap,
     pub jar: &'a mut CookieJar,
-    pub raw_body: &'a [u8],
-    pub body: Body,                    // typed body; () for pages, Input for actions
+    pub raw_body: &'a [u8],            // populated only by buffered generated routes
+    pub body: Body,                    // streaming body for pages/APIs, Input for actions
 }
 ```
 
@@ -43,14 +43,36 @@ pub enum Body {
 impl Body {
     pub fn empty() -> Self;
     pub fn channel() -> (StreamWriter<u8>, Body);
+    pub async fn read_chunk(&mut self) -> Result<Option<Bytes>, BodyError>;
     pub async fn bytes(self) -> Bytes;
+    pub async fn bytes_limited(self, limit: usize) -> Result<Bytes, BodyError>;
+    pub async fn text(self) -> Result<String>;
+    pub async fn text_limited(self, limit: usize) -> Result<String>;
     pub async fn json<T: DeserializeOwned>(self) -> Result<T>;
+    pub async fn json_limited<T: DeserializeOwned>(self, limit: usize) -> Result<T>;
+    pub async fn form(self) -> Result<Vec<(String, String)>>;
+    pub async fn form_limited(self, limit: usize) -> Result<Vec<(String, String)>>;
 }
 ```
 
+The runtime also uses an incoming-stream form for request and client-response
+bodies; its transport fields are managed by the runtime. `BodyError` reports
+buffer-limit overflow, WASI transport errors, cancellation, and invalid UTF-8.
+
+`read_chunk` is single-consumer and backpressured. Each request chunk is at most 64 KiB;
+dropped or unread bodies cancel delivery. `bytes_limited`, `text_limited`, `json_limited`, and
+`form_limited` stop with an error when their explicit buffer limit is exceeded. The default
+buffered limit used by `json`, `text`, and `form` is 1 MiB. `bytes` is retained for compatibility
+and can collect an unbounded body, so use `bytes_limited` for request data.
+
+Generated page and API handlers receive the streaming body in `req.body`. `raw_body` remains a
+legacy slice and is empty for those streaming handlers. Generated actions and hooks buffer their
+input through the 1 MiB convenience limit before deserializing it; this is independent of the
+100 MB transport limit.
+
 Converts from `Vec<u8>`, `&[u8]`, `String`, `&str`, `Bytes`, and `()`.
 
-`Body::channel()` returns a writer/body pair for producing a streaming body incrementally. Bytes written to the `StreamWriter<u8>` are consumed by the paired `Body::Stream`. Spawn a task to write bytes while the body is already in the response:
+`Body::channel()` returns a writer/body pair for producing a streaming body incrementally. Bytes written to the `StreamWriter<u8>` are consumed by the paired body. Spawn a task to write bytes while the body is already in the response:
 
 ```rust
 use forte_sdk::http::{Body, Response};
@@ -69,7 +91,7 @@ let response = Response::builder()
     .body(body)?;
 ```
 
-Use `Body::channel()` when you need to stream a response body without buffering the entire payload — for example, proxying an upstream streaming response or generating a long response incrementally. A response body from `http::Client::send` is already `Body::Stream` and can be forwarded directly without `channel()`.
+Use `Body::channel()` when you need to stream a response body without buffering the entire payload — for example, proxying an upstream streaming response or generating a long response incrementally. A response body from `http::Client::send` is already streaming and can be forwarded directly without `channel()`.
 
 ## Outbound HTTP Client
 
@@ -177,7 +199,7 @@ pub async fn serve<F, Fut, E>(
     dispatch: F,
 ) -> Result<wasi::http::types::Response, ErrorCode>
 where
-    F: FnOnce(http::Request<Vec<u8>>) -> Fut,
+    F: FnOnce(http::Request<forte_sdk::http::Body>) -> Fut,
     Fut: Future<Output = Result<http::Response<Body>, E>>,
     E: fmt::Debug,
 ```

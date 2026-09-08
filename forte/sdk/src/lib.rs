@@ -40,7 +40,7 @@ pub fn now() -> DateTime {
     chrono::Utc::now()
 }
 
-pub struct ForteRequest<'a, Body = ()> {
+pub struct ForteRequest<'a, Body = http::Body> {
     pub uri_authority: &'a str,
     pub method: &'a ::http::Method,
     pub headers: &'a ::http::HeaderMap,

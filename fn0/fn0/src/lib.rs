@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use wasmtime::Engine;
 use wasmtime::component::Linker;
 use wasmtime_wasi_http::p3::bindings::ServicePre;
@@ -72,6 +73,24 @@ pub type WasmProxyPre = ServicePre<ClientState<SystemClock>>;
 pub type Body = UnsyncBoxBody<Bytes, anyhow::Error>;
 pub type Request = hyper::Request<Body>;
 pub type Response = hyper::Response<Body>;
+
+pub const MAX_REQUEST_BODY_SIZE: u64 = 100 * 1024 * 1024;
+
+#[derive(Debug)]
+pub struct RequestBodyTooLarge {
+    pub limit: u64,
+}
+
+impl std::fmt::Display for RequestBodyTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "request body exceeds {} bytes", self.limit)
+    }
+}
+
+impl std::error::Error for RequestBodyTooLarge {}
+
+#[derive(Clone)]
+pub struct RequestCancellation(pub CancellationToken);
 
 const NEXT_HEADER: &str = "x-fn0-next";
 const CACHE_POLICY_ENDPOINT: &str = "/__fn0_cache_policy";
@@ -446,7 +465,7 @@ impl<C: BundleCache> CodeExecutor<C> {
                 .map_err(|error: std::convert::Infallible| anyhow!(error))
                 .boxed_unsync(),
         );
-        let request = match request {
+        let mut request = match request {
             Ok(request) => request,
             Err(error) => {
                 static_page::record_result(
@@ -465,6 +484,9 @@ impl<C: BundleCache> CodeExecutor<C> {
                 return false;
             }
         };
+        if let Some(cancellation) = incoming.extensions().get::<RequestCancellation>() {
+            request.extensions_mut().insert(cancellation.clone());
+        }
 
         match self.run_wasm(project_id, bundle, request).await {
             Ok(response)
@@ -601,8 +623,20 @@ impl<C: BundleCache> CodeExecutor<C> {
         request: Request,
     ) -> Result<Response> {
         let tx = self.wasm_instance_sender(project_id, bundle);
+        let cancellation = request
+            .extensions()
+            .get::<RequestCancellation>()
+            .map(|value| value.0.clone())
+            .unwrap_or_default();
         let (resp_tx, resp_rx) = oneshot::channel();
-        if tx.send((request, resp_tx)).is_err() {
+        if tx
+            .send(execute::WasmInjectEnvelope::new(
+                request,
+                resp_tx,
+                cancellation,
+            ))
+            .is_err()
+        {
             return Err(anyhow!("wasm instance channel closed"));
         }
         resp_rx
@@ -894,12 +928,16 @@ fn static_page_candidate(bundle: &Bundle, request: &Request) -> Option<StaticPag
 
 fn sanitize_static_request(request: Request, normalized_path: &str) -> Request {
     let (mut parts, _) = request.into_parts();
+    let cancellation = parts.extensions.get::<RequestCancellation>().cloned();
     let mut headers = HeaderMap::new();
     if let Some(host) = parts.headers.get(HOST).cloned() {
         headers.insert(HOST, host);
     }
     parts.headers = headers;
     parts.extensions.clear();
+    if let Some(cancellation) = cancellation {
+        parts.extensions.insert(cancellation);
+    }
     parts.uri = normalized_path
         .parse()
         .expect("normalized static page path must be a valid URI");

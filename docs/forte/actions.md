@@ -50,6 +50,7 @@ Key conventions:
 - `handler` — must be `pub async fn`, takes `ForteRequest<'_, Input>`; **must be named exactly `handler`**
 - Return type: `Output` directly (not `Result<Output>`). The codegen calls `forte_json::to_vec(&output)` on the return value, so it must implement `Serialize`. `anyhow::Error` does not implement `Serialize`, so `anyhow::Result<Output>` will not compile.
 - If `Input` deserialization fails (malformed or missing required fields), the runtime returns HTTP 400 "invalid request body: …" before the handler is called.
+- Action input is buffered through the SDK's default 1 MiB convenience limit. A larger JSON request returns HTTP 413; this buffering limit is separate from the 100 MB HTTP transport limit.
 
 `forte add action <name>` generates a backend file with the correct names and signatures ready to compile.
 

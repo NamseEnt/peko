@@ -1,6 +1,6 @@
 # HTTP Body Streaming
 
-Status: approved design, not yet implemented. Tracked by
+Status: implemented. Tracked by
 [GitHub issue #108](https://github.com/NamseEnt/fn0/issues/108).
 
 ## Product contract
@@ -71,21 +71,22 @@ Response bodies follow the same streaming principle. The documented unlimited
 response-body size requires fn0-worker to forward response chunks with
 backpressure instead of collecting the complete response before sending it.
 
-## Current implementation gap
+## Implementation notes
 
-The host-side ingress path currently preserves the Hyper request-body stream
-through the WASI HTTP boundary. The Forte SDK then collects the complete stream
-into a `Vec<u8>` before route dispatch and codegen exposes it as `raw_body`.
-Typed action deserialization can allocate an additional representation while
-the original bytes remain alive.
+The worker enforces the transport limit while preserving the Hyper request-body
+stream through the WASI HTTP boundary. The Forte SDK exposes the request as a
+single-consumer `Body` stream. Generated page and API handlers receive it in
+`ForteRequest::body`; the legacy `raw_body` slice is empty on those routes.
+Typed action and hook deserialization uses an explicit 1 MiB convenience buffer,
+so it cannot materialize an arbitrary 100 MB transport body.
 
 The reused WASM instance has a 128 MB linear-memory ceiling and can serve
-concurrent requests. The current buffering behavior therefore cannot safely
-realize the published 100 MB request-body contract.
+concurrent requests. The worker limits active body chunks to 64 KiB per stream
+and an 8 MiB aggregate request buffer; application-level buffering remains
+explicitly separate from this transport budget.
 
-The response path also collects the complete guest response in fn0-worker before
-returning it to Hyper, so the published unlimited response-body contract is not
-currently end-to-end streaming.
+The worker forwards guest response chunks to Hyper without collecting the complete
+response body.
 
 ## WebSocket relationship
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bytes::Bytes;
 use fn0::cache::BundleCache;
-use fn0::{CodeExecutor, ExecutionContext, panic_payload_string};
+use fn0::{CodeExecutor, ExecutionContext, RequestCancellation, panic_payload_string};
 use futures::FutureExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use std::hash::Hasher;
@@ -196,7 +196,7 @@ where
             tokio::task::spawn_local(async move {
                 let RequestEnvelope {
                     project_id,
-                    req,
+                    mut req,
                     resp_tx,
                     enqueued_at: _,
                     execution_deadline,
@@ -208,36 +208,61 @@ where
                     return;
                 };
                 let active = admission.admission.active.clone();
-                let active_permit =
-                    match tokio::time::timeout(PROJECT_WAIT_DEADLINE, active.acquire_owned()).await
-                    {
-                        Ok(Ok(active_permit)) => active_permit,
-                        Ok(Err(_)) => {
-                            let _ = resp_tx.send(Err(anyhow::anyhow!("project admission closed")));
-                            return;
+                let cancellation = req
+                    .extensions()
+                    .get::<RequestCancellation>()
+                    .map(|value| value.0.clone())
+                    .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+                if req.extensions().get::<RequestCancellation>().is_none() {
+                    req.extensions_mut()
+                        .insert(RequestCancellation(cancellation.clone()));
+                }
+                let active_permit = tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        drop(admission);
+                        let _ = resp_tx.send(Err(anyhow::anyhow!("request cancelled")));
+                        return;
+                    }
+                    active_result = tokio::time::timeout(PROJECT_WAIT_DEADLINE, active.acquire_owned()) => {
+                        match active_result {
+                            Ok(Ok(active_permit)) => active_permit,
+                            Ok(Err(_)) => {
+                                let _ = resp_tx.send(Err(anyhow::anyhow!("project admission closed")));
+                                return;
+                            }
+                            Err(_) => {
+                                let _ = resp_tx.send(Err(anyhow::anyhow!("project admission timeout")));
+                                return;
+                            }
                         }
-                        Err(_) => {
-                            let _ = resp_tx.send(Err(anyhow::anyhow!("project admission timeout")));
-                            return;
-                        }
-                    };
+                    }
+                };
                 if let Some(started_sender) = started_sender {
                     let _ = started_sender.send(());
                 }
-                let outcome = tokio::time::timeout(
-                    execution_deadline,
-                    AssertUnwindSafe(executor.run(&project_id, "/", req, None)).catch_unwind(),
-                )
-                .await;
+                let outcome = tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        drop(active_permit);
+                        drop(admission);
+                        let _ = resp_tx.send(Err(anyhow::anyhow!("request cancelled")));
+                        return;
+                    }
+                    outcome = tokio::time::timeout(
+                        execution_deadline,
+                        AssertUnwindSafe(executor.run(&project_id, "/", req, None)).catch_unwind(),
+                    ) => outcome,
+                };
                 drop(active_permit);
                 drop(admission);
                 match outcome {
                     Ok(Ok(result)) => {
                         if resp_tx.send(result).is_err() {
+                            cancellation.cancel();
                             fn0::telemetry::oneshot_drop_before_response();
                         }
                     }
                     Ok(Err(panic)) => {
+                        cancellation.cancel();
                         let panic_msg = panic_payload_string(&panic);
                         fn0::telemetry::panicked();
                         tracing::error!(
@@ -247,6 +272,7 @@ where
                         );
                     }
                     Err(_) => {
+                        cancellation.cancel();
                         fn0::telemetry::request_deadline_exceeded();
                         let _ = resp_tx
                             .send(Err(anyhow::anyhow!("request execution deadline exceeded")));

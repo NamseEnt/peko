@@ -48,15 +48,19 @@ The `Props` type is serialized to JSON and passed to the React component via the
 `ForteRequest<'a, Body>` is the request context injected into handlers:
 
 ```rust
-pub struct ForteRequest<'a, Body = ()> {
+pub struct ForteRequest<'a, Body = forte_sdk::http::Body> {
     pub uri_authority: &'a str,       // e.g. "example.com"
     pub method: &'a http::Method,
     pub headers: &'a http::HeaderMap,
     pub jar: &'a mut CookieJar,       // mutable: add/remove cookies here
-    pub raw_body: &'a [u8],
-    pub body: Body,                    // typed body (default: ())
+    pub raw_body: &'a [u8],            // empty for streaming page and API handlers
+    pub body: Body,                    // streaming body by default
 }
 ```
+
+Page and API handlers consume `req.body` with `read_chunk`. The 100 MB request limit is a
+transport limit; use an explicit bounded helper when a complete value is required. Generated
+actions and hooks use a separate 1 MiB buffering limit for typed JSON input.
 
 ## Path Parameters
 

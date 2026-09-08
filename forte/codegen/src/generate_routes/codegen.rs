@@ -152,7 +152,7 @@ pub(super) fn generate_code(
 
         proxy::export!(Server);
 
-        async fn dispatch(request: Request<Vec<u8>>) -> Result<Response<Body>> {
+        async fn dispatch(request: Request<Body>) -> Result<Response<Body>> {
             let path_for_route = request.uri().path().to_string();
             let key = classify_route(&path_for_route);
             let result = dispatch_inner(request).await;
@@ -168,8 +168,8 @@ pub(super) fn generate_code(
 
         #cache_policy_handler
 
-        async fn dispatch_inner(request: Request<Vec<u8>>) -> Result<Response<Body>> {
-            let (parts, body_bytes) = request.into_parts();
+        async fn dispatch_inner(request: Request<Body>) -> Result<Response<Body>> {
+            let (parts, body) = request.into_parts();
             let headers = parts.headers;
             let uri = parts.uri;
             let path = uri.path().to_string();
@@ -191,23 +191,38 @@ pub(super) fn generate_code(
             let path = path.as_str();
 
             if let Some(hook_name) = path.strip_prefix("/__self_invoke/") {
+                let body_bytes = body
+                    .bytes_limited(forte_sdk::http::DEFAULT_BODY_BUFFER_LIMIT)
+                    .await?;
                 return handle_hook(hook_name, uri_authority, &method, &headers, &mut cookie_jar, &body_bytes).await;
             }
 
             if let Some(action_name) = path.strip_prefix("/__forte_action/") {
+                let body_bytes = body
+                    .bytes_limited(forte_sdk::http::DEFAULT_BODY_BUFFER_LIMIT)
+                    .await?;
                 return handle_action(action_name, uri_authority, &method, &headers, &mut cookie_jar, &body_bytes).await;
             }
 
             if path == "/__fn0_queue_task/execute" {
+                let body_bytes = body
+                    .bytes_limited(forte_sdk::http::DEFAULT_BODY_BUFFER_LIMIT)
+                    .await?;
                 return handle_queue_task_execute(&body_bytes).await;
             }
 
             if let Some(task_name) = path.strip_prefix("/__forte_admin/") {
+                let body_bytes = body
+                    .bytes_limited(forte_sdk::http::DEFAULT_BODY_BUFFER_LIMIT)
+                    .await?;
                 return handle_admin_task(task_name, &headers, &body_bytes).await;
             }
 
             if headers.contains_key("x-fn0-internal-websocket-event") {
-                return handle_websocket_event(path, uri, headers, body_bytes).await;
+                let body_bytes = body
+                    .bytes_limited(forte_sdk::http::DEFAULT_BODY_BUFFER_LIMIT)
+                    .await?;
+                return handle_websocket_event(path, uri, headers, body_bytes.to_vec()).await;
             }
 
             if path == "/ws" || path.starts_with("/ws/") {
@@ -998,8 +1013,8 @@ fn generate_route_matches(pages: &[PageInfo]) -> Vec<TokenStream> {
                         method: &method,
                         headers: &headers,
                         jar: &mut cookie_jar,
-                        raw_body: &body_bytes,
-                        body: (),
+                        raw_body: &[],
+                        body,
                     };
 
                     #response_handling

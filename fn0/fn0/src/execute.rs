@@ -2,7 +2,9 @@ use crate::cache::Bundle;
 use crate::measure_cpu_time::{Clock, SystemClock, TimeTracker};
 use crate::object_storage_hijack::ObjectStorageHijack;
 use crate::public_storage_hijack::PublicStorageHijack;
-use crate::self_invoke::{self, INVOCATION_DEADLINE, SELF_HOST, SelfInvokeHooks, call_service};
+use crate::self_invoke::{
+    self, INVOCATION_CANCELLATION, INVOCATION_DEADLINE, SELF_HOST, SelfInvokeHooks, call_service,
+};
 use crate::static_page_cache_hijack::StaticPageCacheHijack;
 use crate::turso_hijack::TursoHijack;
 use crate::websocket_hijack::WebSocketHijack;
@@ -21,6 +23,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use wasmtime::{Engine, Store, component::Linker};
 use wasmtime_wasi::cli::AsyncStdoutStream;
 use wasmtime_wasi::*;
@@ -243,7 +246,25 @@ where
     store
 }
 
-pub type WasmInjectEnvelope = (Request, oneshot::Sender<Result<Response>>);
+pub struct WasmInjectEnvelope {
+    pub request: Request,
+    pub response_sender: oneshot::Sender<Result<Response>>,
+    pub cancellation: CancellationToken,
+}
+
+impl WasmInjectEnvelope {
+    pub fn new(
+        request: Request,
+        response_sender: oneshot::Sender<Result<Response>>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            request,
+            response_sender,
+            cancellation,
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_wasm_instance_loop(
@@ -319,8 +340,13 @@ pub async fn run_wasm_instance_loop(
                     biased;
                     maybe = rx.recv() => {
                         match maybe {
-                            Some((req, resp_tx)) => {
-                                let self_host = self_invoke::extract_host(req.headers())
+                            Some(envelope) => {
+                                let WasmInjectEnvelope {
+                                    request,
+                                    response_sender,
+                                    cancellation,
+                                } = envelope;
+                                let self_host = self_invoke::extract_host(request.headers())
                                     .unwrap_or_default();
                                 let service_ref = &service;
                                 let time_tracker = time_tracker.clone();
@@ -329,28 +355,49 @@ pub async fn run_wasm_instance_loop(
                                     let call_start = std::time::Instant::now();
                                     let invocation_deadline =
                                         std::time::Instant::now() + Duration::from_secs(15);
-                                    let result = INVOCATION_DEADLINE
-                                        .scope(invocation_deadline, SELF_HOST.scope(self_host, async move {
-                                            let req_http = req.map(|body| {
-                                                body.map_err(|err| {
-                                                    ErrorCode::InternalError(Some(err.to_string()))
-                                                })
-                                                .boxed_unsync()
-                                            });
-                                            let (p3_req, req_io) = P3Request::from_http(req_http);
-                                            call_service(
-                                                accessor,
-                                                service_ref,
-                                                p3_req,
-                                                req_io,
-                                                time_tracker,
-                                                &is_timeout,
-                                            )
-                                            .await
-                                        }))
-                                        .await;
+                                    let invocation = INVOCATION_DEADLINE.scope(
+                                        invocation_deadline,
+                                        INVOCATION_CANCELLATION.scope(
+                                            cancellation.clone(),
+                                            SELF_HOST.scope(self_host, async move {
+                                                let req_http = request.map(|body| {
+                                                    body.map_err(|error| {
+                                                        if let Some(limit_error) = error
+                                                            .downcast_ref::<crate::RequestBodyTooLarge>()
+                                                        {
+                                                            ErrorCode::HttpRequestBodySize(Some(
+                                                                limit_error.limit,
+                                                            ))
+                                                        } else {
+                                                            ErrorCode::InternalError(Some(
+                                                                error.to_string(),
+                                                            ))
+                                                        }
+                                                    })
+                                                    .boxed_unsync()
+                                                });
+                                                let (p3_req, req_io) =
+                                                    P3Request::from_http(req_http);
+                                                call_service(
+                                                    accessor,
+                                                    service_ref,
+                                                    p3_req,
+                                                    req_io,
+                                                    time_tracker,
+                                                    &is_timeout,
+                                                )
+                                                .await
+                                            }),
+                                        ),
+                                    );
+                                    let result = tokio::select! {
+                                        _ = cancellation.cancelled() => {
+                                            Err(anyhow!("request cancelled"))
+                                        }
+                                        result = invocation => result,
+                                    };
                                     telemetry::stage_duration("wasm_call", call_start.elapsed());
-                                    if resp_tx.send(result).is_err() {
+                                    if response_sender.send(result).is_err() {
                                         telemetry::oneshot_drop_before_response();
                                     }
                                 }));

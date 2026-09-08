@@ -86,20 +86,10 @@ pub async fn handler(
 
 ## Accessing Request Data
 
-API handlers receive the full `ForteRequest` context, so you can read headers, cookies, and the raw body:
+API handlers receive the full `ForteRequest` context, so you can read headers, cookies, and the
+request stream:
 
 ```rust
-pub async fn handler(req: ForteRequest<'_>) -> Result<Props> {
-    let auth = req.headers.get("authorization");
-    let raw = req.raw_body;
-    // ...
-}
-```
-
-For POST endpoints that accept a JSON body, use `forte_sdk::forte_json::from_slice`:
-
-```rust
-use forte_sdk::forte_json;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -108,11 +98,34 @@ struct CreateUserRequest {
 }
 
 pub async fn handler(req: ForteRequest<'_>) -> Result<Props> {
-    let body: CreateUserRequest = forte_json::from_slice(req.raw_body)?;
+    let auth = req.headers.get("authorization");
+    let mut body = req.body;
+    while let Some(chunk) = body.read_chunk().await? {
+        process_chunk(chunk).await?;
+    }
+    // ...
+}
+```
+
+`req.body` is a single-consumer, backpressured stream. `req.raw_body` is a legacy slice and is
+empty for streaming page and API handlers. Buffer only when the endpoint needs a complete value,
+and make the bound explicit:
+
+```rust
+pub async fn handler(req: ForteRequest<'_>) -> Result<Props> {
+    let body = req
+        .body
+        .json_limited::<CreateUserRequest>(1024 * 1024)
+        .await?;
     // body.name is parsed with camelCase→snake_case key conversion
     // ...
 }
 ```
+
+The transport accepts up to 100 MB, but convenience parsing is intentionally bounded and a
+buffer limit error is returned before application logic continues. Durable file uploads should
+normally use a presigned object-storage URL; presigned uploads are recommended, not required for
+large streaming HTTP processing.
 
 ## Raw Responses (`ForteResponse`)
 
@@ -145,7 +158,7 @@ Key differences from Props handlers:
 
 - **Status and headers are yours.** Nothing is added or defaulted — set `content-type` yourself.
 - **The body bypasses `forte_json`.** Serialize with `serde_json` (re-exported by the SDK) when a protocol requires exact field names without camelCase or `t`-discriminant conversion.
-- **The body can stream.** `Body` is `Empty`, `Bytes(Vec<u8>)`, or `Stream`. `Body::channel()` returns a writer/body pair for producing bytes incrementally, and a response from `forte_sdk::http::Client::send` already carries a streaming body, so an upstream response can be proxied straight through.
+- **The body can stream.** `Body` supports empty, buffered, and streaming values. `Body::channel()` returns a writer/body pair for producing bytes incrementally, and a response from `forte_sdk::http::Client::send` already carries a streaming body, so an upstream response can be proxied straight through.
 - **Error handling is unchanged.** `Err` still becomes 302 for `Redirect` and 500 otherwise.
 
 `ForteResponse` handlers are only supported under `rs/src/apis/`. A page handler returning `ForteResponse` fails the build — pages must return `Props` for SSR. The declaration also works directly in the signature (`-> Result<ForteResponse>`) without the alias.

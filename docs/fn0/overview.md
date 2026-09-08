@@ -43,10 +43,8 @@ The request-body value is a transport limit. Applications can process bodies up
 to that limit with bounded memory only by streaming; buffering remains subject
 to the 128 MB memory limit. Durable file uploads should normally use presigned
 object-storage URLs, while streaming through compute remains supported for cases
-that require it. End-to-end request and response streaming is an approved design
-that is not yet implemented; see
-[HTTP Body Streaming](../design/http-body-streaming.md) and
-[GitHub issue #108](https://github.com/NamseEnt/fn0/issues/108).
+that require it. Request and response streaming is implemented end to end; see
+[HTTP Body Streaming](../design/http-body-streaming.md).
 
 ### Cluster Architecture (Internal)
 

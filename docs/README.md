@@ -44,7 +44,7 @@ Forte is the full-stack web framework built on fn0.
 
 - [Forte WebSockets](design/forte-websockets.md) — Host-owned connection and direct QUIC routing design
 - [Forte Persistent Outbound WebSockets](design/forte-websocket-singleton-connectors.md) — Project-scoped singleton connections kept alive by fn0 without an application invocation
-- [HTTP Body Streaming](design/http-body-streaming.md) — Approved 100 MB streaming request and end-to-end response-body contract; not yet implemented
+- [HTTP Body Streaming](design/http-body-streaming.md) — 100 MB streaming request and end-to-end response-body contract
 
 ## Development
 

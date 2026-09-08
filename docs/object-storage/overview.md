@@ -265,9 +265,10 @@ In `forte dev` there is no edge: both calls read the local store, so
 
 ### Presigned uploads
 
-`presigned_put_url` hands out an upload URL so the bytes never pass through
-your app, which is what makes files larger than the 100 MB request limit
-possible:
+`presigned_put_url` hands out an upload URL so durable file bytes do not pass
+through your app. This is the recommended path for large uploads and avoids
+using compute for storage transfer, while HTTP handlers can still stream bodies
+up to the 100 MB transport limit when application processing is required:
 
 ```rust
 let url = public

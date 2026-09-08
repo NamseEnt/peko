@@ -1,6 +1,6 @@
 use std::fmt;
 
-use wit_bindgen::rt::async_support::{StreamReader, StreamWriter};
+use wit_bindgen::rt::async_support::{FutureReader, StreamReader, StreamResult, StreamWriter};
 
 use crate::bindings::wasi::http::client;
 use crate::bindings::wasi::http::types as p3;
@@ -12,13 +12,38 @@ pub use http::uri::{Authority, PathAndQuery, Scheme, Uri};
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 
 pub mod body {
-    pub use super::{Body, Bytes};
+    pub use super::{Body, BodyError, Bytes};
 }
+
+pub const DEFAULT_BODY_BUFFER_LIMIT: usize = 1024 * 1024;
+pub const BODY_CHUNK_SIZE: usize = 64 * 1024;
 
 pub enum Body {
     Empty,
     Bytes(Vec<u8>),
     Stream(StreamReader<u8>),
+    Incoming {
+        reader: StreamReader<u8>,
+        trailers: Option<FutureReader<core::result::Result<Option<p3::Trailers>, p3::ErrorCode>>>,
+    },
+}
+
+#[derive(Debug)]
+pub enum BodyError {
+    TooLarge { limit: usize },
+    Wasi(p3::ErrorCode),
+    Cancelled,
+    InvalidUtf8(std::string::FromUtf8Error),
+}
+
+impl BodyError {
+    pub fn is_too_large(&self) -> bool {
+        match self {
+            BodyError::TooLarge { .. } => true,
+            BodyError::Wasi(p3::ErrorCode::HttpRequestBodySize(_)) => true,
+            BodyError::Wasi(_) | BodyError::Cancelled | BodyError::InvalidUtf8(_) => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -31,6 +56,7 @@ pub enum Error {
     Wasi(p3::ErrorCode),
     BuildResponse(http::Error),
     Json(serde_json::Error),
+    Body(BodyError),
 }
 
 impl fmt::Display for Error {
@@ -44,6 +70,7 @@ impl fmt::Display for Error {
             Error::Wasi(ec) => write!(f, "wasi http error: {ec:?}"),
             Error::BuildResponse(e) => write!(f, "failed to build response: {e}"),
             Error::Json(e) => write!(f, "failed to decode JSON: {e}"),
+            Error::Body(e) => write!(f, "failed to read body: {e}"),
         }
     }
 }
@@ -53,6 +80,7 @@ impl std::error::Error for Error {
         match self {
             Error::BuildResponse(e) => Some(e),
             Error::Json(e) => Some(e),
+            Error::Body(e) => Some(e),
             _ => None,
         }
     }
@@ -70,6 +98,34 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+impl From<BodyError> for Error {
+    fn from(value: BodyError) -> Self {
+        Error::Body(value)
+    }
+}
+
+impl fmt::Display for BodyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BodyError::TooLarge { limit } => {
+                write!(f, "request body exceeds the {limit} byte buffering limit")
+            }
+            BodyError::Wasi(error) => write!(f, "WASI HTTP body error: {error:?}"),
+            BodyError::Cancelled => write!(f, "request body delivery was cancelled"),
+            BodyError::InvalidUtf8(error) => write!(f, "request body is not valid UTF-8: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BodyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            BodyError::InvalidUtf8(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 pub type Result<T> = core::result::Result<T, Error>;
 
 impl Body {
@@ -82,17 +138,116 @@ impl Body {
         (writer, Body::Stream(reader))
     }
 
-    pub async fn bytes(self) -> Bytes {
-        match self {
-            Body::Empty => Bytes::new(),
-            Body::Bytes(v) => Bytes::from(v),
-            Body::Stream(reader) => Bytes::from(reader.collect().await),
+    pub(crate) fn incoming(
+        reader: StreamReader<u8>,
+        trailers: FutureReader<core::result::Result<Option<p3::Trailers>, p3::ErrorCode>>,
+    ) -> Self {
+        Body::Incoming {
+            reader,
+            trailers: Some(trailers),
         }
     }
 
+    pub async fn read_chunk(&mut self) -> core::result::Result<Option<Bytes>, BodyError> {
+        match self {
+            Body::Empty => Ok(None),
+            Body::Bytes(bytes) => {
+                let bytes = core::mem::take(bytes);
+                *self = Body::Empty;
+                if bytes.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(Bytes::from(bytes)))
+                }
+            }
+            Body::Stream(reader) => read_stream_chunk(reader).await,
+            Body::Incoming { reader, trailers } => read_incoming_chunk(reader, trailers).await,
+        }
+    }
+
+    pub async fn bytes_limited(mut self, limit: usize) -> core::result::Result<Bytes, BodyError> {
+        let mut buffered = Vec::new();
+        while let Some(chunk) = self.read_chunk().await? {
+            let remaining = limit.saturating_sub(buffered.len());
+            if chunk.len() > remaining {
+                return Err(BodyError::TooLarge { limit });
+            }
+            buffered.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(buffered))
+    }
+
+    pub async fn bytes(self) -> Bytes {
+        self.bytes_limited(usize::MAX).await.unwrap_or_default()
+    }
+
     pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T> {
-        let bytes = self.bytes().await;
+        self.json_limited(DEFAULT_BODY_BUFFER_LIMIT).await
+    }
+
+    pub async fn json_limited<T: serde::de::DeserializeOwned>(self, limit: usize) -> Result<T> {
+        let bytes = self.bytes_limited(limit).await.map_err(Error::Body)?;
         serde_json::from_slice(&bytes).map_err(Error::Json)
+    }
+
+    pub async fn text(self) -> Result<String> {
+        self.text_limited(DEFAULT_BODY_BUFFER_LIMIT).await
+    }
+
+    pub async fn text_limited(self, limit: usize) -> Result<String> {
+        let bytes = self.bytes_limited(limit).await.map_err(Error::Body)?;
+        String::from_utf8(bytes.to_vec())
+            .map_err(|error| Error::Body(BodyError::InvalidUtf8(error)))
+    }
+
+    pub async fn form(self) -> Result<Vec<(String, String)>> {
+        self.form_limited(DEFAULT_BODY_BUFFER_LIMIT).await
+    }
+
+    pub async fn form_limited(self, limit: usize) -> Result<Vec<(String, String)>> {
+        let bytes = self.bytes_limited(limit).await.map_err(Error::Body)?;
+        Ok(form_urlencoded::parse(&bytes)
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect())
+    }
+}
+
+async fn read_stream_chunk(
+    reader: &mut StreamReader<u8>,
+) -> core::result::Result<Option<Bytes>, BodyError> {
+    loop {
+        let (status, bytes) = reader.read(Vec::with_capacity(BODY_CHUNK_SIZE)).await;
+        match status {
+            StreamResult::Complete(_) if bytes.is_empty() => continue,
+            StreamResult::Complete(_) | StreamResult::Dropped => {
+                return Ok((!bytes.is_empty()).then(|| Bytes::from(bytes)));
+            }
+            StreamResult::Cancelled => return Err(BodyError::Cancelled),
+        }
+    }
+}
+
+async fn read_incoming_chunk(
+    reader: &mut StreamReader<u8>,
+    trailers: &mut Option<FutureReader<core::result::Result<Option<p3::Trailers>, p3::ErrorCode>>>,
+) -> core::result::Result<Option<Bytes>, BodyError> {
+    loop {
+        let (status, bytes) = reader.read(Vec::with_capacity(BODY_CHUNK_SIZE)).await;
+        match status {
+            StreamResult::Complete(_) if bytes.is_empty() => continue,
+            StreamResult::Complete(_) => return Ok(Some(Bytes::from(bytes))),
+            StreamResult::Dropped => {
+                let trailer_result = match trailers.take() {
+                    Some(trailer_reader) => trailer_reader.await,
+                    None => Ok(None),
+                };
+                match trailer_result {
+                    Ok(_) => return Ok((!bytes.is_empty()).then(|| Bytes::from(bytes))),
+                    Err(error) => return Err(BodyError::Wasi(error)),
+                }
+            }
+            StreamResult::Cancelled => return Err(BodyError::Cancelled),
+        }
     }
 }
 
@@ -163,6 +318,7 @@ impl Client {
                 Some(reader)
             }
             Body::Stream(reader) => Some(reader),
+            Body::Incoming { reader, .. } => Some(reader),
         };
 
         let (trailers_writer, trailers_reader) = wit_future::new::<
@@ -207,13 +363,19 @@ impl Client {
         crate::runtime::spawn(async move {
             drop(res_trailers_writer);
         });
-        let (body_stream, _trailers) = p3::Response::consume_body(wasi_resp, res_trailers_reader);
+        let (body_stream, body_trailers) =
+            p3::Response::consume_body(wasi_resp, res_trailers_reader);
 
         let mut builder = Response::builder().status(status);
         for (name, value) in header_list {
             builder = builder.header(name, value);
         }
-        builder.body(Body::Stream(body_stream)).map_err(Error::from)
+        builder
+            .body(Body::Incoming {
+                reader: body_stream,
+                trailers: Some(body_trailers),
+            })
+            .map_err(Error::from)
     }
 }
 

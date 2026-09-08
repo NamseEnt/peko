@@ -20,9 +20,9 @@ use cert_resolver::SniCertResolver;
 use color_eyre::eyre::Result;
 use fn0::{
     CrossProjectEnqueueHijack, CrossProjectInvokeDispatcher, CrossProjectInvokeHijack,
-    ExecutionContext, MetricCardinalityGate, ObjectStorageHijack, OtlpHijack, PresignGate,
-    PublicStorageHijack, PurgeGate, QueueHijack, StaticPageCacheHijack, TursoHijack, VaultHijack,
-    WebSocketHijack,
+    ExecutionContext, MAX_REQUEST_BODY_SIZE, MetricCardinalityGate, ObjectStorageHijack,
+    OtlpHijack, PresignGate, PublicStorageHijack, PurgeGate, QueueHijack, RequestBodyTooLarge,
+    RequestCancellation, StaticPageCacheHijack, TursoHijack, VaultHijack, WebSocketHijack,
 };
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full};
@@ -30,14 +30,20 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use mimalloc::MiMalloc;
+use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use storage_resolver::ManifestStorageResolver;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use vault_client::VaultClient;
 use worker_pool::{DispatchError, RequestEnvelope};
 
@@ -52,6 +58,9 @@ const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15)
 const CONTROL_PROJECT_ID: &str = "fn0-control";
 const DEPLOY_STATUS_PATH: &str = "/__forte_action/deploy_status";
 const CONTROL_DEPLOY_STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const REQUEST_BODY_CHUNK_SIZE: usize = 64 * 1024;
+const AGGREGATE_REQUEST_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+const MAX_CONNECTION_BUFFER_SIZE: usize = 128 * 1024;
 
 fn select_request_deadline(project_id: &str, request_path: &str) -> std::time::Duration {
     if project_id == CONTROL_PROJECT_ID && request_path == DEPLOY_STATUS_PATH {
@@ -59,6 +68,14 @@ fn select_request_deadline(project_id: &str, request_path: &str) -> std::time::D
     } else {
         REQUEST_DEADLINE
     }
+}
+
+fn declared_request_body_exceeds_limit(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_REQUEST_BODY_SIZE)
 }
 
 pub fn read_pem_env(name: &str) -> Option<String> {
@@ -529,6 +546,9 @@ async fn run_user_server(
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "user server listening (TLS)");
+    let stream_budget = Arc::new(Semaphore::new(
+        AGGREGATE_REQUEST_BUFFER_SIZE / REQUEST_BODY_CHUNK_SIZE,
+    ));
 
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -540,6 +560,7 @@ async fn run_user_server(
         let cache = cache.clone();
         let apex_route = apex_route.clone();
         let websocket_service = websocket_service.clone();
+        let stream_budget = stream_budget.clone();
 
         tokio::spawn(async move {
             // Sniff first byte to multiplex TLS user traffic (Cloudflare → NLB
@@ -573,6 +594,7 @@ async fn run_user_server(
                     let cache = cache.clone();
                     let apex_route = apex_route.clone();
                     let websocket_service = websocket_service.clone();
+                    let stream_budget = stream_budget.clone();
                     async move {
                         handle_user_request(
                             req,
@@ -583,6 +605,7 @@ async fn run_user_server(
                             apex_route,
                             websocket_service,
                             peer_addr,
+                            stream_budget,
                         )
                         .await
                     }
@@ -590,7 +613,9 @@ async fn run_user_server(
 
                 let result = match tls_acceptor.accept(socket).await {
                     Ok(tls_stream) => {
-                        http1::Builder::new()
+                        let mut connection_builder = http1::Builder::new();
+                        connection_builder.max_buf_size(MAX_CONNECTION_BUFFER_SIZE);
+                        connection_builder
                             .serve_connection(TokioIo::new(tls_stream), service)
                             .with_upgrades()
                             .await
@@ -678,17 +703,237 @@ impl Drop for InFlightGuard {
     }
 }
 
-type HyperResponse = hyper::Response<Full<Bytes>>;
+type HyperResponse = hyper::Response<fn0::Body>;
+
+fn full_body(body_bytes: Bytes) -> fn0::Body {
+    Full::new(body_bytes)
+        .map_err(|error: Infallible| match error {})
+        .boxed_unsync()
+}
+
+struct LimitedRequestBody {
+    inner: hyper::body::Incoming,
+    received: u64,
+    stopped: bool,
+    pending_data: Option<Bytes>,
+    too_large: Arc<AtomicBool>,
+    cancellation: CancellationToken,
+    stream_budget: Arc<Semaphore>,
+    budget_permit: Option<OwnedSemaphorePermit>,
+    budget_waiter: Option<
+        Pin<
+            Box<
+                dyn Future<Output = Result<OwnedSemaphorePermit, tokio::sync::AcquireError>> + Send,
+            >,
+        >,
+    >,
+}
+
+impl LimitedRequestBody {
+    fn new(
+        inner: hyper::body::Incoming,
+        stream_budget: Arc<Semaphore>,
+        too_large: Arc<AtomicBool>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            inner,
+            received: 0,
+            stopped: false,
+            pending_data: None,
+            too_large,
+            cancellation,
+            stream_budget,
+            budget_permit: None,
+            budget_waiter: None,
+        }
+    }
+}
+
+impl http_body::Body for LimitedRequestBody {
+    type Data = Bytes;
+    type Error = anyhow::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        if self.stopped {
+            return Poll::Ready(None);
+        }
+
+        self.budget_permit.take();
+        if self.budget_waiter.is_none() {
+            self.budget_waiter = Some(Box::pin(self.stream_budget.clone().acquire_owned()));
+        }
+        let budget_result = self
+            .budget_waiter
+            .as_mut()
+            .expect("body budget waiter must exist")
+            .as_mut()
+            .poll(context);
+        let budget_permit = match budget_result {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(budget_permit)) => budget_permit,
+            Poll::Ready(Err(error)) => {
+                self.stopped = true;
+                return Poll::Ready(Some(Err(anyhow::Error::new(error))));
+            }
+        };
+        self.budget_waiter = None;
+        self.budget_permit = Some(budget_permit);
+
+        if let Some(mut pending_data) = self.pending_data.take() {
+            let chunk_length = pending_data.len().min(REQUEST_BODY_CHUNK_SIZE);
+            let chunk = pending_data.split_to(chunk_length);
+            if !pending_data.is_empty() {
+                self.pending_data = Some(pending_data);
+            }
+            return Poll::Ready(Some(Ok(http_body::Frame::data(chunk))));
+        }
+
+        match Pin::new(&mut self.inner).poll_frame(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Ok(frame))) => {
+                let Some(data) = frame.data_ref() else {
+                    return Poll::Ready(Some(Ok(frame)));
+                };
+                let data_length = data.len() as u64;
+                let received = self.received.saturating_add(data_length);
+                if received > MAX_REQUEST_BODY_SIZE {
+                    self.stopped = true;
+                    self.too_large.store(true, Ordering::Release);
+                    self.cancellation.cancel();
+                    return Poll::Ready(Some(Err(anyhow::Error::new(RequestBodyTooLarge {
+                        limit: MAX_REQUEST_BODY_SIZE,
+                    }))));
+                }
+                self.received = received;
+                let mut data = frame
+                    .into_data()
+                    .expect("frame data was present when the frame was inspected");
+                let chunk_length = data.len().min(REQUEST_BODY_CHUNK_SIZE);
+                let chunk = data.split_to(chunk_length);
+                if !data.is_empty() {
+                    self.pending_data = Some(data);
+                }
+                Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.stopped = true;
+                self.cancellation.cancel();
+                Poll::Ready(Some(Err(anyhow::Error::new(error))))
+            }
+            Poll::Ready(None) => {
+                self.stopped = true;
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.stopped || self.pending_data.is_none() && self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        let mut hint = self.inner.size_hint();
+        let remaining = MAX_REQUEST_BODY_SIZE.saturating_sub(self.received);
+        hint.set_lower(hint.lower().min(remaining));
+        if let Some(upper) = hint.upper() {
+            hint.set_upper(upper.min(remaining));
+        } else {
+            hint.set_upper(remaining);
+        }
+        hint
+    }
+}
+
+struct CancellationGuard {
+    token: CancellationToken,
+    armed: bool,
+}
+
+impl CancellationGuard {
+    fn new(token: CancellationToken) -> Self {
+        Self { token, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+struct CancellationBody {
+    inner: fn0::Body,
+    token: Option<CancellationToken>,
+    _in_flight_guard: Option<InFlightGuard>,
+}
+
+impl CancellationBody {
+    fn new(inner: fn0::Body, token: CancellationToken, in_flight: InFlightGuard) -> Self {
+        Self {
+            inner,
+            token: Some(token),
+            _in_flight_guard: Some(in_flight),
+        }
+    }
+
+    fn cancel(&mut self) {
+        if let Some(token) = self.token.take() {
+            token.cancel();
+        }
+    }
+}
+
+impl Drop for CancellationBody {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl http_body::Body for CancellationBody {
+    type Data = Bytes;
+    type Error = anyhow::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.inner).poll_frame(context) {
+            Poll::Ready(None) => {
+                self.cancel();
+                Poll::Ready(None)
+            }
+            result => result,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
 
 async fn handle_plain_health_request(
     req: hyper::Request<hyper::body::Incoming>,
 ) -> std::result::Result<HyperResponse, anyhow::Error> {
     if req.method() == hyper::Method::GET && req.uri().path() == "/health" {
-        Ok(hyper::Response::new(Full::new(Bytes::from("ok"))))
+        Ok(hyper::Response::new(full_body(Bytes::from("ok"))))
     } else {
         Ok(hyper::Response::builder()
             .status(404)
-            .body(Full::new(Bytes::new()))
+            .body(full_body(Bytes::new()))
             .unwrap())
     }
 }
@@ -703,11 +948,11 @@ async fn handle_ops_request(
     match (req.method(), req.uri().path()) {
         (&hyper::Method::GET, "/ready") => {
             if manifest_loaded.load(Ordering::Acquire) {
-                Ok(hyper::Response::new(Full::new(Bytes::from("ready"))))
+                Ok(hyper::Response::new(full_body(Bytes::from("ready"))))
             } else {
                 Ok(hyper::Response::builder()
                     .status(503)
-                    .body(Full::new(Bytes::from("manifest not loaded")))
+                    .body(full_body(Bytes::from("manifest not loaded")))
                     .unwrap())
             }
         }
@@ -715,7 +960,7 @@ async fn handle_ops_request(
             drain_flag.store(true, Ordering::Relaxed);
             websocket_service.close_all().await;
             tracing::info!("worker entered drain mode");
-            Ok(hyper::Response::new(Full::new(Bytes::from("draining"))))
+            Ok(hyper::Response::new(full_body(Bytes::from("draining"))))
         }
         (&hyper::Method::GET, "/status") => {
             let active_count = instance_count.load(Ordering::Relaxed)
@@ -729,18 +974,18 @@ async fn handle_ops_request(
             Ok(hyper::Response::builder()
                 .status(200)
                 .header("content-type", "application/json")
-                .body(Full::new(Bytes::from(s)))
+                .body(full_body(Bytes::from(s)))
                 .unwrap())
         }
         (&hyper::Method::GET, "/health") => {
-            Ok(hyper::Response::new(Full::new(Bytes::from("good"))))
+            Ok(hyper::Response::new(full_body(Bytes::from("good"))))
         }
         (&hyper::Method::GET, "/role") => {
-            Ok(hyper::Response::new(Full::new(Bytes::from("worker"))))
+            Ok(hyper::Response::new(full_body(Bytes::from("worker"))))
         }
         _ => Ok(hyper::Response::builder()
             .status(404)
-            .body(Full::new(Bytes::from("not found")))
+            .body(full_body(Bytes::from("not found")))
             .unwrap()),
     }
 }
@@ -757,14 +1002,14 @@ async fn handle_websocket_upgrade(
             return Ok(hyper::Response::builder()
                 .status(429)
                 .header("retry-after", "1")
-                .body(Full::new(Bytes::new()))
+                .body(full_body(Bytes::new()))
                 .unwrap());
         }
         Err(websocket::CapacityError::Worker) => {
             return Ok(hyper::Response::builder()
                 .status(503)
                 .header("retry-after", "1")
-                .body(Full::new(Bytes::new()))
+                .body(full_body(Bytes::new()))
                 .unwrap());
         }
     };
@@ -786,7 +1031,7 @@ async fn handle_websocket_upgrade(
             tracing::warn!(%project_id, %error, "websocket on_connect failed");
             return Ok(hyper::Response::builder()
                 .status(500)
-                .body(Full::new(Bytes::new()))
+                .body(full_body(Bytes::new()))
                 .unwrap());
         }
     };
@@ -801,7 +1046,7 @@ async fn handle_websocket_upgrade(
                 response = response.header(header_name, header_value);
             }
         }
-        return Ok(response.body(Full::new(Bytes::new()))?);
+        return Ok(response.body(full_body(Bytes::new()))?);
     }
 
     let selected_protocol = connect_response
@@ -816,7 +1061,7 @@ async fn handle_websocket_upgrade(
     {
         return Ok(hyper::Response::builder()
             .status(500)
-            .body(Full::new(Bytes::new()))
+            .body(full_body(Bytes::new()))
             .unwrap());
     }
 
@@ -828,7 +1073,7 @@ async fn handle_websocket_upgrade(
         return Ok(hyper::Response::builder()
             .status(503)
             .header("retry-after", "1")
-            .body(Full::new(Bytes::new()))
+            .body(full_body(Bytes::new()))
             .unwrap());
     }
 
@@ -839,12 +1084,12 @@ async fn handle_websocket_upgrade(
             tracing::warn!(%project_id, %error, "invalid websocket upgrade request");
             return Ok(hyper::Response::builder()
                 .status(400)
-                .body(Full::new(Bytes::new()))
+                .body(full_body(Bytes::new()))
                 .unwrap());
         }
     };
     let (upgrade_parts, _) = upgrade_response.into_parts();
-    let mut response = hyper::Response::from_parts(upgrade_parts, Full::new(Bytes::new()));
+    let mut response = hyper::Response::from_parts(upgrade_parts, full_body(Bytes::new()));
     for (header_name, header_value) in connect_response.headers() {
         if websocket_handshake_header_allowed(header_name) {
             response
@@ -914,11 +1159,12 @@ async fn handle_user_request(
     apex_route: Option<Arc<ApexRoute>>,
     websocket_service: Arc<websocket::WebSocketService>,
     peer_addr: SocketAddr,
+    stream_budget: Arc<Semaphore>,
 ) -> std::result::Result<HyperResponse, anyhow::Error> {
     if req.uri().path().starts_with("/__fn0_queue_task/") {
         return Ok(hyper::Response::builder()
             .status(403)
-            .body(Full::new(Bytes::from("Forbidden")))
+            .body(full_body(Bytes::from("Forbidden")))
             .unwrap());
     }
 
@@ -926,11 +1172,24 @@ async fn handle_user_request(
         return Ok(hyper::Response::builder()
             .status(503)
             .header("connection", "close")
-            .body(Full::new(Bytes::from("draining")))
+            .body(full_body(Bytes::from("draining")))
             .unwrap());
     }
 
-    let _guard = InFlightGuard::new(instance_count);
+    if declared_request_body_exceeds_limit(req.headers()) {
+        return Ok(hyper::Response::builder()
+            .status(413)
+            .header("connection", "close")
+            .body(full_body(Bytes::from("Payload Too Large")))
+            .unwrap());
+    }
+
+    let in_flight_guard = InFlightGuard::new(instance_count);
+    let cancellation = CancellationToken::new();
+    let mut cancellation_guard = CancellationGuard::new(cancellation.clone());
+    let body_too_large = Arc::new(AtomicBool::new(false));
+    req.extensions_mut()
+        .insert(RequestCancellation(cancellation.clone()));
 
     let internal_headers: Vec<hyper::header::HeaderName> = req
         .headers()
@@ -960,7 +1219,7 @@ async fn handle_user_request(
                 fn0::telemetry::stage_duration("resolve_domain", resolve_start.elapsed());
                 return Ok(hyper::Response::builder()
                     .status(404)
-                    .body(Full::new(Bytes::from("Not Found")))
+                    .body(full_body(Bytes::from("Not Found")))
                     .unwrap());
             }
         },
@@ -972,9 +1231,13 @@ async fn handle_user_request(
     }
 
     let mapped_req = req.map(|body| {
-        UnsyncBoxBody::new(body)
-            .map_err(|e: hyper::Error| anyhow::anyhow!(e))
-            .boxed_unsync()
+        UnsyncBoxBody::new(LimitedRequestBody::new(
+            body,
+            stream_budget,
+            body_too_large.clone(),
+            cancellation.clone(),
+        ))
+        .boxed_unsync()
     });
 
     let (resp_tx, resp_rx) = oneshot::channel();
@@ -988,14 +1251,14 @@ async fn handle_user_request(
                 tracing::warn!(%project_id, "worker queue full");
                 return Ok(hyper::Response::builder()
                     .status(503)
-                    .body(Full::new(Bytes::from("Service Unavailable")))
+                    .body(full_body(Bytes::from("Service Unavailable")))
                     .unwrap());
             }
             DispatchError::Closed => {
                 tracing::error!(%project_id, "worker queue closed");
                 return Ok(hyper::Response::builder()
                     .status(500)
-                    .body(Full::new(Bytes::from("Internal Server Error")))
+                    .body(full_body(Bytes::from("Internal Server Error")))
                     .unwrap());
             }
         }
@@ -1007,7 +1270,7 @@ async fn handle_user_request(
             tracing::error!(%project_id, "worker dropped response channel");
             return Ok(hyper::Response::builder()
                 .status(500)
-                .body(Full::new(Bytes::from("Internal Server Error")))
+                .body(full_body(Bytes::from("Internal Server Error")))
                 .unwrap());
         }
         Err(_) => {
@@ -1016,31 +1279,40 @@ async fn handle_user_request(
             return Ok(hyper::Response::builder()
                 .status(504)
                 .header("connection", "close")
-                .body(Full::new(Bytes::from("Gateway Timeout")))
+                .body(full_body(Bytes::from("Gateway Timeout")))
                 .unwrap());
         }
     };
 
     match run_result {
         Ok(resp) => {
+            if body_too_large.load(Ordering::Acquire) {
+                return Ok(hyper::Response::builder()
+                    .status(413)
+                    .header("connection", "close")
+                    .body(full_body(Bytes::from("Payload Too Large")))
+                    .unwrap());
+            }
             let (parts, body) = resp.into_parts();
-            let collect_start = std::time::Instant::now();
-            let collected: std::result::Result<http_body_util::Collected<Bytes>, anyhow::Error> =
-                body.collect().await;
-            fn0::telemetry::stage_duration("body_collect", collect_start.elapsed());
-            let body_bytes = match collected {
-                Ok(c) => c.to_bytes(),
-                Err(err) => {
-                    tracing::error!(%err, %project_id, "response body collect failed");
-                    return Ok(hyper::Response::builder()
-                        .status(502)
-                        .body(Full::new(Bytes::from("Bad Gateway")))
-                        .unwrap());
-                }
-            };
-            Ok(hyper::Response::from_parts(parts, Full::new(body_bytes)))
+            cancellation_guard.disarm();
+            let response_body =
+                UnsyncBoxBody::new(CancellationBody::new(body, cancellation, in_flight_guard))
+                    .boxed_unsync();
+            Ok(hyper::Response::from_parts(parts, response_body))
         }
         Err(err) => {
+            if body_too_large.load(Ordering::Acquire)
+                || err
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<fn0::RequestBodyTooLarge>().is_some())
+                || err.to_string().contains("HttpRequestBodySize")
+            {
+                return Ok(hyper::Response::builder()
+                    .status(413)
+                    .header("connection", "close")
+                    .body(full_body(Bytes::from("Payload Too Large")))
+                    .unwrap());
+            }
             // Walk the chain: singleflight and the fetch path wrap this, and a
             // wrapped NotFound answered 502 instead of 404, which reads as a
             // broken deploy rather than an absent one.
@@ -1054,7 +1326,7 @@ async fn handle_user_request(
                 return Ok(hyper::Response::builder()
                     .status(404)
                     .header("content-type", "text/plain; charset=utf-8")
-                    .body(Full::new(Bytes::from(
+                    .body(full_body(Bytes::from(
                         "No application is deployed at this subdomain.",
                     )))
                     .unwrap());
@@ -1065,7 +1337,7 @@ async fn handle_user_request(
             tracing::error!(%project_id, path = %request_path, "Failed to run fn0: {err:#}");
             Ok(hyper::Response::builder()
                 .status(502)
-                .body(Full::new(Bytes::from("Bad Gateway")))
+                .body(full_body(Bytes::from("Bad Gateway")))
                 .unwrap())
         }
     }
@@ -1074,9 +1346,10 @@ async fn handle_user_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_DEPLOY_STATUS_DEADLINE, DEPLOY_STATUS_PATH, REQUEST_DEADLINE,
-        select_request_deadline,
+        CONTROL_DEPLOY_STATUS_DEADLINE, DEPLOY_STATUS_PATH, MAX_REQUEST_BODY_SIZE,
+        REQUEST_DEADLINE, declared_request_body_exceeds_limit, select_request_deadline,
     };
+    use hyper::HeaderMap;
 
     #[test]
     fn deploy_status_gets_extended_deadline_only_for_control_project() {
@@ -1092,5 +1365,20 @@ mod tests {
             select_request_deadline("other-project", DEPLOY_STATUS_PATH),
             REQUEST_DEADLINE
         );
+    }
+
+    #[test]
+    fn content_length_limit_rejects_only_values_above_the_transport_limit() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::CONTENT_LENGTH,
+            MAX_REQUEST_BODY_SIZE.to_string().parse().unwrap(),
+        );
+        assert!(!declared_request_body_exceeds_limit(&headers));
+        headers.insert(
+            hyper::header::CONTENT_LENGTH,
+            (MAX_REQUEST_BODY_SIZE + 1).to_string().parse().unwrap(),
+        );
+        assert!(declared_request_body_exceeds_limit(&headers));
     }
 }
