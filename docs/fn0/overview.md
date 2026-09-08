@@ -59,14 +59,14 @@ that require it. Request and response streaming is implemented end to end; see
 
 | Package | Version | Description |
 |---|---|---|
-| `fn0` | 0.6.7 | Core FaaS runtime (`ExecutionContext`, `Bundle`, `build_engine`) |
-| `fn0-cli` | 0.1.18 | Local development CLI |
-| `fn0-worker` | 0.4.11 | Worker binary (distributed execution node) |
-| `fn0-worker-agent` | 0.1.6 | Per-instance container supervisor (blue-green deploys, in-host TCP proxy) |
-| `fn0-worker-proxy` | 0.1.0 | Tiny TCP forwarder fronting fn0-worker containers; polls a target file written by worker-agent |
-| `fn0-deploy` | 0.3.2 | fn0 Cloud deployment client |
-| `fn0-wasmtime` | 0.2.0 | Wasmtime wrapper with fn0-specific config |
-| `fn0-ski` | 0.1.11 | WinterCG-compatible JS runtime (Deno-based, no Node.js) |
+| `fn0` | 0.6.8 | Core FaaS runtime (`ExecutionContext`, `Bundle`, `build_engine`) |
+| `fn0-cli` | 0.1.19 | Local development CLI |
+| `fn0-worker` | 0.4.12 | Worker binary (distributed execution node) |
+| `fn0-worker-agent` | 0.1.7 | Per-instance container supervisor (blue-green deploys, in-host TCP proxy) |
+| `fn0-worker-proxy` | 0.1.1 | Tiny TCP forwarder fronting fn0-worker containers; polls a target file written by worker-agent |
+| `fn0-deploy` | 0.3.3 | fn0 Cloud deployment client |
+| `fn0-wasmtime` | 0.2.1 | Wasmtime wrapper with fn0-specific config |
+| `fn0-ski` | 0.1.12 | WinterCG-compatible JS runtime (Deno-based, no Node.js) |
 | `fn0-compiler` | 0.1.0 | CLI tool: compiles `.wasm` → `.cwasm` (Wasmtime pre-compiled native format); used internally by the platform |
 
 ## fn0-cli Commands

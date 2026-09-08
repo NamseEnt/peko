@@ -20,7 +20,7 @@ rcgen = { version = "=0.14.7", default-features = false, features = ["pem", "rin
 forte-json = { path = "../../../forte/json" }
 forte-sdk = { path = "../../../forte/sdk" }
 doc-db = { package = "fn0-doc-db", path = "../../../doc-db" }
-fn0-shared-schema = { path = "../../shared-schema", version = "=0.2.5" }
+fn0-shared-schema = { path = "../../shared-schema", version = "=0.2.6" }
 futures = "0.3"
 tracing = "=0.1.44"
 

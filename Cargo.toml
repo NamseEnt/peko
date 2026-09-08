@@ -15,16 +15,16 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/NamseEnt/fn0"
 
 [workspace.dependencies]
-fn0 = { path = "fn0/fn0", version = "=0.6.7" }
-fn0-shared-schema = { path = "fn0/shared-schema", version = "=0.2.5" }
-fn0-deploy = { path = "fn0/deploy", version = "=0.3.2" }
-fn0-wasmtime = { path = "fn0/wasmtime", version = "=0.2.0" }
-ski = { package = "fn0-ski", path = "fn0/ski", version = "=0.1.11" }
-doc-db = { package = "fn0-doc-db", path = "doc-db", version = "=0.4.12" }
-object-storage = { package = "fn0-object-storage", path = "object-storage", version = "=0.5.6" }
-forte-json = { path = "forte/json", version = "=0.1.2" }
+fn0 = { path = "fn0/fn0", version = "=0.6.8" }
+fn0-shared-schema = { path = "fn0/shared-schema", version = "=0.2.6" }
+fn0-deploy = { path = "fn0/deploy", version = "=0.3.3" }
+fn0-wasmtime = { path = "fn0/wasmtime", version = "=0.2.1" }
+ski = { package = "fn0-ski", path = "fn0/ski", version = "=0.1.12" }
+doc-db = { package = "fn0-doc-db", path = "doc-db", version = "=0.4.13" }
+object-storage = { package = "fn0-object-storage", path = "object-storage", version = "=0.5.7" }
+forte-json = { path = "forte/json", version = "=0.1.3" }
 forte-macros = { path = "forte/macros", version = "=0.6.0" }
-forte-sdk = { path = "forte/sdk", version = "=0.8.2" }
+forte-sdk = { path = "forte/sdk", version = "=0.9.0" }
 forte-wit = { path = "forte/wit", version = "=0.2.0" }
 
 aes-gcm = "=0.10.3"
