@@ -6,6 +6,25 @@ modules under `rs/src/ws_in`; they are published below `/ws`. Create outbound ro
 route modules under `rs/src/ws_singleton`; fn0 keeps exactly one connection per singleton alive
 project-wide and routes its messages to the same handler on any worker.
 
+## Local development
+
+`forte dev` accepts WebSocket upgrades for `/ws` and `/ws/...` and runs the same generated
+`on_connect`, `on_message`, and `on_disconnect` callbacks as the deployed worker. Text and binary
+messages are delivered through the internal callback request body protocol. Selected subprotocols
+and application response headers are forwarded when they pass the same platform header checks;
+transport and `x-fn0-*` headers remain owned by fn0.
+
+The local server installs a WebSocket hijack, so `forte_sdk::websocket::send` and
+`forte_sdk::websocket::disconnect` operate on active local connections. A Rust source rebuild or
+server shutdown closes active connections with close code `1012` and invokes `on_disconnect` on a
+best-effort basis. Local development has no distributed ownership or cross-worker routing.
+
+Generated `ws_out` `connect(url)` functions support `ws://` and `wss://` targets and route inbound
+messages to the corresponding callbacks. The target must be reachable from the development
+machine and present a certificate trusted by the bundled WebPKI root certificates for `wss://`
+connections.
+Persistent `ws_singleton` connections are not opened by `forte dev`.
+
 ## Route example
 
 ```rust

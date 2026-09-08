@@ -1,8 +1,27 @@
 use assert_cmd::cargo;
+use bytes::Bytes;
+use fastwebsockets::{Frame, OpCode, Payload};
+use http_body_util::Empty;
+use hyper::header::{CONNECTION, HOST, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
+use hyper::{Method, Request};
+use std::future::Future;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Duration;
+use tokio::net::TcpStream;
+
+struct WebSocketTestExecutor;
+
+impl<Fut> hyper::rt::Executor<Fut> for WebSocketTestExecutor
+where
+    Fut: Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    fn execute(&self, future: Fut) {
+        tokio::spawn(future);
+    }
+}
 
 static ONLY_ONE_DEV_SERVER_AT_A_TIME: Mutex<()> = Mutex::new(());
 
@@ -112,6 +131,112 @@ fn install_npm_deps(project_dir: &std::path::Path) {
         .stderr(Stdio::inherit())
         .status()
         .expect("Failed to run npm install");
+}
+
+const DEV_WEBSOCKET_ROUTE: &str = r#"
+use forte_sdk::anyhow::Result;
+use forte_sdk::http::HeaderMap;
+use forte_sdk::websocket::{ConnectDecision, ConnectEvent, DisconnectEvent, IncomingMessage, MessageEvent, WebSocketMessage};
+
+pub async fn on_connect(_event: ConnectEvent) -> Result<ConnectDecision> {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-app-handshake", "accepted".parse()?);
+    Ok(ConnectDecision::Accept {
+        protocol: Some("chat.v1".to_string()),
+        headers,
+    })
+}
+
+pub async fn on_message(event: MessageEvent) -> Result<()> {
+    let connection_id = event.connection_id;
+    let response = match event.message {
+        IncomingMessage::Text(text) => WebSocketMessage::text(format!("echo:{text}")),
+        IncomingMessage::Binary(bytes) => WebSocketMessage::binary(bytes),
+    };
+    forte_sdk::websocket::send(&connection_id, response).await?;
+    Ok(())
+}
+
+pub async fn on_disconnect(_event: DisconnectEvent) -> Result<()> {
+    Ok(())
+}
+"#;
+
+#[test]
+fn test_dev_websocket_accepts_frames_and_echoes() {
+    let _dev_server_slot = take_the_only_dev_server_slot();
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = init_dev_project(temp.path(), "test-app-websocket");
+
+    install_npm_deps(&project_dir);
+    let websocket_dir = project_dir.join("rs/src/ws_in");
+    std::fs::create_dir_all(&websocket_dir).unwrap();
+    std::fs::write(websocket_dir.join("index.rs"), DEV_WEBSOCKET_ROUTE).unwrap();
+
+    let server = DevServer::start(&project_dir);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let socket = TcpStream::connect(("127.0.0.1", server.port))
+            .await
+            .unwrap();
+        let authority = format!("127.0.0.1:{}", server.port);
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://{authority}/ws"))
+            .header(HOST, &authority)
+            .header(UPGRADE, "websocket")
+            .header(CONNECTION, "Upgrade")
+            .header(
+                "Sec-WebSocket-Key",
+                fastwebsockets::handshake::generate_key(),
+            )
+            .header("Sec-WebSocket-Version", "13")
+            .header(SEC_WEBSOCKET_PROTOCOL, "chat.v1")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let (mut websocket, response) =
+            fastwebsockets::handshake::client(&WebSocketTestExecutor, request, socket)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), 101);
+        assert_eq!(response.headers()["x-app-handshake"], "accepted");
+        assert_eq!(response.headers()[SEC_WEBSOCKET_PROTOCOL], "chat.v1");
+
+        websocket
+            .write_frame(Frame::text(Payload::Owned(b"hello".to_vec())))
+            .await
+            .unwrap();
+        websocket.flush().await.unwrap();
+        let text_frame = tokio::time::timeout(Duration::from_secs(10), websocket.read_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(text_frame.opcode, OpCode::Text);
+        assert_eq!(text_frame.payload.to_vec(), b"echo:hello");
+
+        websocket
+            .write_frame(Frame::binary(Payload::Owned(vec![0, 1, 2, 255])))
+            .await
+            .unwrap();
+        websocket.flush().await.unwrap();
+        let binary_frame = tokio::time::timeout(Duration::from_secs(10), websocket.read_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binary_frame.opcode, OpCode::Binary);
+        assert_eq!(binary_frame.payload.to_vec(), &[0, 1, 2, 255]);
+
+        websocket
+            .write_frame(Frame::close(1000, b"done"))
+            .await
+            .unwrap();
+        websocket.flush().await.unwrap();
+        let close_frame = tokio::time::timeout(Duration::from_secs(10), websocket.read_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(close_frame.opcode, OpCode::Close);
+    });
 }
 
 #[test]

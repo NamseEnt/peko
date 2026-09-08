@@ -2519,9 +2519,11 @@ version = "0.6.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
+ "fastwebsockets",
  "fn0",
  "fn0-deploy",
  "futures",
@@ -2539,16 +2541,20 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha1",
  "syn 2.0.113",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml 0.8.23",
  "toml_edit",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

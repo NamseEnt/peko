@@ -359,6 +359,10 @@ pub async fn run(options: DevOptions) -> Result<()> {
         format!("http://localhost:{port}"),
     ));
 
+    let websocket_hijack = Arc::new(fn0::WebSocketHijack::new(
+        "fn0-websocket.fn0.dev".to_string(),
+    ));
+
     let local_service_env = vec![
         (
             "TURSO_URL".to_string(),
@@ -400,6 +404,7 @@ pub async fn run(options: DevOptions) -> Result<()> {
         object_storage_hijack: Some(object_storage_hijack),
         public_storage_hijack: Some(public_storage_hijack),
         static_page_cache_hijack: Some(static_page_cache_hijack),
+        websocket_hijack: Some(websocket_hijack),
     };
 
     let handle = server::run(config).await?;
@@ -450,7 +455,8 @@ pub async fn run(options: DevOptions) -> Result<()> {
     });
 
     let mut vite = vite;
-    let result = run_watch_loop(&project_dir, handle, local_service_env).await;
+    let result = run_watch_loop(&project_dir, &handle, local_service_env).await;
+    handle.websocket_service.close_all().await;
 
     let _ = vite.child.kill();
     _sqld.kill();
@@ -483,7 +489,7 @@ fn resolve_dev_env(
 
 async fn run_watch_loop(
     project_dir: &Path,
-    handle: ServerHandle,
+    handle: &ServerHandle,
     local_service_env: Vec<(String, String)>,
 ) -> Result<()> {
     let (tx, mut rx) = unbounded_channel();
@@ -510,8 +516,19 @@ async fn run_watch_loop(
 
     let mut known_rs_mtimes = collect_file_mtimes(&rs_dir, &["rs"]);
     let mut known_env_mtimes = env_mtimes(&env_files);
+    let mut shutdown_signal = Box::pin(tokio::signal::ctrl_c());
 
-    while let Some(evt_result) = rx.recv().await {
+    loop {
+        let evt_result = tokio::select! {
+            signal_result = &mut shutdown_signal => {
+                signal_result.context("failed to listen for shutdown signal")?;
+                break;
+            }
+            evt_result = rx.recv() => evt_result,
+        };
+        let Some(evt_result) = evt_result else {
+            break;
+        };
         match evt_result {
             Ok(events) => {
                 let rs_changes: Vec<_> = events
@@ -547,7 +564,7 @@ async fn run_watch_loop(
                 }
 
                 if !rs_changes.is_empty() {
-                    let result = rebuild_backend(project_dir, &handle).await;
+                    let result = rebuild_backend(project_dir, handle).await;
                     known_rs_mtimes = collect_file_mtimes(&rs_dir, &["rs"]);
 
                     while rx.try_recv().is_ok() {}
@@ -567,6 +584,10 @@ async fn run_watch_loop(
 }
 
 async fn rebuild_backend(project_dir: &Path, handle: &ServerHandle) -> Result<()> {
+    handle
+        .websocket_service
+        .close_project(server::DEV_CODE_ID)
+        .await;
     run_codegen(project_dir).await?;
     build_backend(project_dir)?;
     handle

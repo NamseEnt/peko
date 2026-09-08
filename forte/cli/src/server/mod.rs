@@ -1,5 +1,6 @@
 mod cache;
 pub mod vite_dev;
+pub mod websocket;
 
 use anyhow::Result;
 pub use cache::SimpleCache;
@@ -31,11 +32,13 @@ pub struct ServerConfig {
     pub object_storage_hijack: Option<Arc<ObjectStorageHijack>>,
     pub public_storage_hijack: Option<Arc<PublicStorageHijack>>,
     pub static_page_cache_hijack: Option<Arc<StaticPageCacheHijack>>,
+    pub websocket_hijack: Option<Arc<fn0::WebSocketHijack>>,
 }
 
 pub struct ServerHandle {
     pub ctx: Arc<ExecutionContext<SimpleCache>>,
     pub executor: std::rc::Rc<CodeExecutor<SimpleCache>>,
+    pub websocket_service: Arc<websocket::LocalWebSocketService>,
 }
 
 pub const DEV_CODE_ID: &str = "app";
@@ -54,6 +57,7 @@ pub async fn run(config: ServerConfig) -> Result<ServerHandle> {
     );
 
     let vite_socket_path = config.vite_socket_path.map(Arc::new);
+    let websocket_hijack = config.websocket_hijack.clone();
 
     let mut ctx = ExecutionContext::new(engine, linker, cache);
     if let Some(hijack) = config.queue_hijack {
@@ -68,14 +72,20 @@ pub async fn run(config: ServerConfig) -> Result<ServerHandle> {
     if let Some(hijack) = config.static_page_cache_hijack {
         ctx = ctx.with_static_page_cache_hijack(hijack);
     }
+    if let Some(hijack) = websocket_hijack.clone() {
+        ctx = ctx.with_websocket_hijack(hijack);
+    }
     let ctx = Arc::new(ctx);
     let executor = std::rc::Rc::new(CodeExecutor::new(ctx.clone()));
+    let websocket_service =
+        websocket::LocalWebSocketService::start(executor.clone(), websocket_hijack);
 
     let public_dir = Arc::new(config.public_dir);
 
     let handle = ServerHandle {
         ctx: ctx.clone(),
         executor: executor.clone(),
+        websocket_service: websocket_service.clone(),
     };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -95,6 +105,7 @@ pub async fn run(config: ServerConfig) -> Result<ServerHandle> {
             let executor_clone = executor.clone();
             let public_dir_clone = public_dir.clone();
             let vite_socket_path_clone = vite_socket_path.clone();
+            let websocket_service_clone = websocket_service.clone();
 
             tokio::task::spawn_local(async move {
                 let io = TokioIo::new(socket);
@@ -104,7 +115,16 @@ pub async fn run(config: ServerConfig) -> Result<ServerHandle> {
                         let executor = executor_clone.clone();
                         let public_dir = public_dir_clone.clone();
                         let vite_socket = vite_socket_path_clone.clone();
-                        handle_request(req, executor, public_dir, vite_socket, is_loopback)
+                        let websocket_service = websocket_service_clone.clone();
+                        handle_request(
+                            req,
+                            executor,
+                            public_dir,
+                            vite_socket,
+                            websocket_service,
+                            peer_addr,
+                            is_loopback,
+                        )
                     }),
                 );
                 if let Err(err) = conn.with_upgrades().await {
@@ -122,11 +142,21 @@ async fn handle_request(
     executor: std::rc::Rc<CodeExecutor<SimpleCache>>,
     public_dir: Arc<PathBuf>,
     vite_socket_path: Option<Arc<PathBuf>>,
+    websocket_service: Arc<websocket::LocalWebSocketService>,
+    peer_addr: SocketAddr,
     is_loopback: bool,
 ) -> Result<fn0::Response> {
     let uri = req.uri().clone();
     let path = uri.path();
     let path_with_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(path);
+
+    if (path == "/ws" || path.starts_with("/ws/"))
+        && fastwebsockets::upgrade::is_upgrade_request(&req)
+    {
+        return websocket_service
+            .handle_inbound(req, executor, DEV_CODE_ID, Some(peer_addr))
+            .await;
+    }
 
     if path.starts_with("/__fn0_queue_task/") {
         return Ok(Response::builder()
