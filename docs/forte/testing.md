@@ -26,7 +26,7 @@ name = "my_test"
 harness = false
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-forte-sdk = { version = "0.8", features = ["test-harness"] }
+forte-sdk = { version = "0.9", features = ["test-harness"] }
 ```
 
 ```rust

@@ -113,7 +113,7 @@ fn0 injects these automatically in both `forte dev` and deployed apps. You do no
 | `FN0_QUEUE_URL` | Always (queue endpoint; always present even if queue tasks are not used) |
 | `FN0_OBJECT_STORAGE_URL` | Always (object storage endpoint) |
 
-If you call `generate_env()` and declare these keys in `env.yaml`, `forte dev` will set them to the injected values automatically. You do not need entries in `env.yaml` for them; refer to the platform clients (`doc_db::bucket()`, `object_storage::private::bucket()`, etc.) which read these variables internally.
+If you call `generate_env()` and declare these keys in `env.yaml`, `forte dev` will set them to the injected values automatically. You do not need entries in `env.yaml` for them; refer to the platform clients (`doc_db::turso()`, `object_storage::private::bucket()`, etc.) which read these variables internally.
 
 ## Variables you set yourself
 
